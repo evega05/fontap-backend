@@ -124,6 +124,25 @@ def ver_solicitudes_fontanero(fontanero_id: int, db: Session = Depends(get_db)):
             models.Fontanero.id == fontanero_id
         ).first()
 
+    # Si no existe en tabla fontaneros, crearla automáticamente
+    if not fontanero:
+        usuario_obj = db.query(models.Usuario).filter(
+            models.Usuario.id == fontanero_id
+        ).first()
+        if usuario_obj and usuario_obj.tipo == "fontanero":
+            fontanero = models.Fontanero(
+                usuario_id=fontanero_id,
+                nombre=usuario_obj.nombre,
+                telefono=usuario_obj.telefono,
+                disponible=True,
+                disponible_24h=False,
+                valoracion=5.0,
+                zona="Bilbao",
+            )
+            db.add(fontanero)
+            db.commit()
+            db.refresh(fontanero)
+
     # Solicitudes pendientes (sin fontanero aún)
     pendientes = db.query(models.Servicio).filter(
         models.Servicio.estado == "pendiente",
