@@ -1,21 +1,15 @@
-# ══════════════════════════════════════════════════════════════════
-# PARCHE schemas.py — modifica el schema Token para incluir id y email
-# ══════════════════════════════════════════════════════════════════
-
 from pydantic import BaseModel
 from typing import Optional
 import datetime
 
-# ─── TOKEN (devuelto en login/registro) ───────────────────────────
 class Token(BaseModel):
     access_token: str
     token_type: str
     tipo_usuario: str
-    nombre: str
-    id: int              # ← NUEVO: necesario para llamadas al backend
-    email: str           # ← NUEVO
+    nombre: Optional[str] = None
+    id: Optional[int] = None
+    email: Optional[str] = None
 
-# ─── USUARIO ──────────────────────────────────────────────────────
 class UsuarioRegistro(BaseModel):
     nombre: str
     email: str
@@ -27,20 +21,28 @@ class UsuarioLogin(BaseModel):
     email: str
     password: str
 
-# ─── FONTANERO ────────────────────────────────────────────────────
-class FontaneroRespuesta(BaseModel):
+class UsuarioRespuesta(BaseModel):
     id: int
     nombre: str
+    email: str
+    telefono: str
+    tipo: str
+
+    class Config:
+        from_attributes = True
+
+class FontaneroRespuesta(BaseModel):
+    id: int
+    nombre: Optional[str] = None
     zona: Optional[str] = None
     disponible: bool
-    disponible_24h: bool = False    # ← NUEVO
+    disponible_24h: bool = False
     valoracion: Optional[float] = None
     foto_url: Optional[str] = None
 
     class Config:
         from_attributes = True
 
-# ─── SERVICIO ─────────────────────────────────────────────────────
 class ServicioCrear(BaseModel):
     tipo: str
     descripcion: Optional[str] = None
@@ -49,17 +51,18 @@ class ServicioCrear(BaseModel):
 
 class ServicioRespuesta(BaseModel):
     id: int
+    cliente_id: int
+    fontanero_id: Optional[int] = None
     tipo: str
     descripcion: Optional[str] = None
     urgente: bool
     estado: str
-    precio: Optional[float] = None   # ← NUEVO
+    precio: Optional[float] = None
     fecha: Optional[datetime.datetime] = None
 
     class Config:
         from_attributes = True
 
-# ─── SERVICIO FONTANERO ───────────────────────────────────────────
 class ServicioFontaneroCrear(BaseModel):
     nombre: str
     precio: float
@@ -67,6 +70,7 @@ class ServicioFontaneroCrear(BaseModel):
 
 class ServicioFontaneroRespuesta(BaseModel):
     id: int
+    fontanero_id: int
     nombre: str
     precio: float
     duracion_minutos: int
@@ -75,7 +79,6 @@ class ServicioFontaneroRespuesta(BaseModel):
     class Config:
         from_attributes = True
 
-# ─── HORARIO ──────────────────────────────────────────────────────
 class HorarioBaseCrear(BaseModel):
     dia_semana: int
     hora_inicio: str
@@ -84,6 +87,7 @@ class HorarioBaseCrear(BaseModel):
 
 class HorarioBaseRespuesta(BaseModel):
     id: int
+    fontanero_id: int
     dia_semana: int
     hora_inicio: str
     hora_fin: str
@@ -92,7 +96,6 @@ class HorarioBaseRespuesta(BaseModel):
     class Config:
         from_attributes = True
 
-# ─── BLOQUEO ──────────────────────────────────────────────────────
 class BloqueoCrear(BaseModel):
     fecha: datetime.datetime
     hora_inicio: str
@@ -101,6 +104,7 @@ class BloqueoCrear(BaseModel):
 
 class BloqueoRespuesta(BaseModel):
     id: int
+    fontanero_id: int
     fecha: datetime.datetime
     hora_inicio: str
     hora_fin: str
