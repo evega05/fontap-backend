@@ -354,3 +354,19 @@ def eliminar_servicio(fontanero_id: int, servicio_id: int, db: Session = Depends
     servicio.activo = False
     db.commit()
     return {"mensaje": "Servicio eliminado"}
+
+@app.get("/clientes/{cliente_id}/servicios")
+def ver_servicios_cliente(cliente_id: int, db: Session = Depends(get_db)):
+    servicios = db.query(models.Servicio).filter(
+        models.Servicio.cliente_id == cliente_id
+    ).order_by(models.Servicio.id.desc()).all()
+    return servicios
+
+@app.put("/servicios/{servicio_id}/confirmar_efectivo")
+def confirmar_efectivo(servicio_id: int, db: Session = Depends(get_db)):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    servicio.estado = "pagado"
+    db.commit()
+    return {"mensaje": "Efectivo confirmado"}
