@@ -259,10 +259,19 @@ def confirmar_pago(servicio_id: int, datos: PagoUpdate, db: Session = Depends(ge
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
     if not servicio.precio:
         raise HTTPException(status_code=400, detail="El fontanero aún no ha enviado el precio")
-    servicio.estado = "pagado"
+    servicio.estado = "pago_pendiente" if datos.metodo == "efectivo" else "pagado"
     servicio.metodo_pago = datos.metodo
     db.commit()
-    return {"mensaje": "Pago confirmado", "precio": servicio.precio}
+    return {"mensaje": "Pago registrado", "precio": servicio.precio, "metodo": datos.metodo}
+
+@app.put("/servicios/{servicio_id}/confirmar_efectivo")
+def confirmar_efectivo(servicio_id: int, db: Session = Depends(get_db)):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    servicio.estado = "pagado"
+    db.commit()
+    return {"mensaje": "Efectivo confirmado"}
 
 # ─── HORARIOS / BLOQUEOS / SERVICIOS FONTANERO (existentes) ───────────────────
 
