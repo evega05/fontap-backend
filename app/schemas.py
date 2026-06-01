@@ -38,8 +38,40 @@ class FontaneroRespuesta(BaseModel):
     disponible_24h: bool = False
     valoracion: Optional[float] = None
     foto_url: Optional[str] = None
+    descripcion: Optional[str] = None
+    especialidades: Optional[str] = None
+    vacaciones_desde: Optional[datetime.datetime] = None
+    vacaciones_hasta: Optional[datetime.datetime] = None
     class Config:
         from_attributes = True
+
+class FontaneroActualizar(BaseModel):
+    zona: Optional[str] = None
+    descripcion: Optional[str] = None
+    especialidades: Optional[str] = None
+    disponible_24h: Optional[bool] = None
+
+class VacacionesCrear(BaseModel):
+    desde: datetime.datetime
+    hasta: datetime.datetime
+
+class GaleriaCrear(BaseModel):
+    descripcion: Optional[str] = None
+
+class GaleriaRespuesta(BaseModel):
+    id: int
+    fontanero_id: int
+    url: str
+    descripcion: Optional[str] = None
+    creado_en: datetime.datetime
+    class Config:
+        from_attributes = True
+
+class EstadisticasRespuesta(BaseModel):
+    trabajos_completados: int
+    ingresos_totales: float
+    valoracion_media: float
+    tasa_aceptacion: float
 
 class ServicioCrear(BaseModel):
     tipo: str
