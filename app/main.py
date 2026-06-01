@@ -84,6 +84,36 @@ def _crear_notificacion(db: Session, usuario_id: int, titulo: str, cuerpo: str, 
 def inicio():
     return {"mensaje": "FonTap API funcionando"}
 
+@app.post("/migrar-db")
+def migrar_db():
+    from .database import engine
+    from sqlalchemy import text
+    columnas = [
+        ("fontaneros", "descripcion", "TEXT"),
+        ("fontaneros", "especialidades", "TEXT"),
+        ("fontaneros", "vacaciones_desde", "TIMESTAMP"),
+        ("fontaneros", "vacaciones_hasta", "TIMESTAMP"),
+        ("fontaneros", "gremio", "VARCHAR DEFAULT 'fontanero'"),
+        ("fontaneros", "verificado", "BOOLEAN DEFAULT FALSE"),
+        ("fontaneros", "num_trabajos", "INTEGER DEFAULT 0"),
+        ("fontaneros", "disponible_24h", "BOOLEAN DEFAULT FALSE"),
+        ("fontaneros", "foto_url", "VARCHAR"),
+        ("servicios", "urgencia_ia", "VARCHAR"),
+        ("servicios", "eta_minutos", "INTEGER"),
+        ("servicios", "comision_aplicada", "FLOAT"),
+        ("servicios", "stripe_payment_intent", "VARCHAR"),
+    ]
+    resultados = []
+    with engine.connect() as conn:
+        for tabla, columna, tipo in columnas:
+            try:
+                conn.execute(text(f"ALTER TABLE {tabla} ADD COLUMN IF NOT EXISTS {columna} {tipo}"))
+                conn.commit()
+                resultados.append(f"OK: {tabla}.{columna}")
+            except Exception as ex:
+                resultados.append(f"SKIP: {tabla}.{columna} ({ex})")
+    return {"resultado": resultados}
+
 @app.post("/registro", response_model=schemas.Token)
 def registrar_usuario(usuario: schemas.UsuarioRegistro, db: Session = Depends(get_db)):
     existe = db.query(models.Usuario).filter(models.Usuario.email == usuario.email).first()
