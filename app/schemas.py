@@ -106,3 +106,40 @@ class BloqueoRespuesta(BaseModel):
     motivo: Optional[str] = None
     class Config:
         from_attributes = True
+
+class ImagenRespuesta(BaseModel):
+    id: int
+    servicio_id: int
+    url: str
+    creado_en: datetime.datetime
+    class Config:
+        from_attributes = True
+
+class MensajeCrear(BaseModel):
+    texto: str
+
+class MensajeRespuesta(BaseModel):
+    id: int
+    servicio_id: int
+    emisor_id: int
+    texto: str
+    leido: bool
+    creado_en: datetime.datetime
+    class Config:
+        from_attributes = True
+
+class TokenPushCrear(BaseModel):
+    token: str
+    plataforma: str = "android"
+
+class NotificacionRespuesta(BaseModel):
+    id: int
+    usuario_id: int
+    titulo: str
+    cuerpo: str
+    tipo: Optional[str] = None
+    referencia_id: Optional[int] = None
+    leida: bool
+    creado_en: datetime.datetime
+    class Config:
+        from_attributes = True
