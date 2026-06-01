@@ -27,6 +27,10 @@ class Fontanero(Base):
     disponible_24h = Column(Boolean, default=False)
     valoracion = Column(Float, default=5.0)
     foto_url = Column(String, nullable=True)
+    descripcion = Column(Text, nullable=True)
+    especialidades = Column(Text, nullable=True)
+    vacaciones_desde = Column(DateTime, nullable=True)
+    vacaciones_hasta = Column(DateTime, nullable=True)
 
 class Servicio(Base):
     __tablename__ = "servicios"
@@ -68,6 +72,14 @@ class BloqueoHorario(Base):
     hora_inicio = Column(String)
     hora_fin = Column(String)
     motivo = Column(String, nullable=True)
+
+class GaleriaFontanero(Base):
+    __tablename__ = "galeria_fontanero"
+    id = Column(Integer, primary_key=True, index=True)
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    url = Column(String)
+    descripcion = Column(String, nullable=True)
+    creado_en = Column(DateTime, default=utcnow)
 
 class ImagenServicio(Base):
     __tablename__ = "imagenes_servicio"

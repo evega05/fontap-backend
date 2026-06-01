@@ -213,6 +213,14 @@ def crear_servicio(
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
+    if servicio.urgente:
+        fontaneros_zona = db.query(models.Fontanero).filter(
+            models.Fontanero.disponible == True,
+            models.Fontanero.usuario_id != None,
+        ).all()
+        for f in fontaneros_zona:
+            _crear_notificacion(db, f.usuario_id, "Nueva solicitud urgente", f"Solicitud urgente de {servicio.tipo} cerca de tu zona", "solicitud_urgente", nuevo.id)
+        db.commit()
     return nuevo
 
 @app.get("/servicios/{servicio_id}")
@@ -609,3 +617,204 @@ def marcar_todas_leidas(
     ).update({"leida": True})
     db.commit()
     return {"mensaje": "Todas las notificaciones marcadas como leídas"}
+
+# ─── PERFIL FONTANERO ──────────────────────────────────────────────────────────
+
+@app.put("/fontaneros/{fontanero_id}/perfil")
+def actualizar_perfil_fontanero(
+    fontanero_id: int,
+    datos: schemas.FontaneroActualizar,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    if datos.zona is not None:
+        fontanero.zona = datos.zona
+    if datos.descripcion is not None:
+        fontanero.descripcion = datos.descripcion
+    if datos.especialidades is not None:
+        fontanero.especialidades = datos.especialidades
+    if datos.disponible_24h is not None:
+        fontanero.disponible_24h = datos.disponible_24h
+    db.commit()
+    return {"mensaje": "Perfil actualizado"}
+
+@app.post("/fontaneros/{fontanero_id}/foto")
+def subir_foto_perfil(
+    fontanero_id: int,
+    archivo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    if archivo.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
+    ext = archivo.filename.rsplit(".", 1)[-1] if "." in archivo.filename else "jpg"
+    nombre_archivo = f"perfil_{uuid.uuid4().hex}.{ext}"
+    ruta = os.path.join(UPLOAD_DIR, nombre_archivo)
+    with open(ruta, "wb") as f:
+        f.write(archivo.file.read())
+    fontanero.foto_url = f"/uploads/{nombre_archivo}"
+    db.commit()
+    return {"foto_url": fontanero.foto_url}
+
+@app.get("/fontaneros/{fontanero_id}/perfil", response_model=schemas.FontaneroRespuesta)
+def ver_perfil_fontanero(fontanero_id: int, db: Session = Depends(get_db)):
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    return fontanero
+
+# ─── VACACIONES ────────────────────────────────────────────────────────────────
+
+@app.put("/fontaneros/{fontanero_id}/vacaciones")
+def activar_vacaciones(
+    fontanero_id: int,
+    datos: schemas.VacacionesCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    fontanero.vacaciones_desde = datos.desde
+    fontanero.vacaciones_hasta = datos.hasta
+    fontanero.disponible = False
+    db.commit()
+    return {"mensaje": "Modo vacaciones activado"}
+
+@app.delete("/fontaneros/{fontanero_id}/vacaciones")
+def cancelar_vacaciones(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    fontanero.vacaciones_desde = None
+    fontanero.vacaciones_hasta = None
+    fontanero.disponible = True
+    db.commit()
+    return {"mensaje": "Modo vacaciones cancelado"}
+
+# ─── GALERÍA DE TRABAJOS ───────────────────────────────────────────────────────
+
+@app.post("/fontaneros/{fontanero_id}/galeria", response_model=schemas.GaleriaRespuesta)
+def subir_foto_galeria(
+    fontanero_id: int,
+    descripcion: Optional[str] = None,
+    archivo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    if archivo.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
+    ext = archivo.filename.rsplit(".", 1)[-1] if "." in archivo.filename else "jpg"
+    nombre_archivo = f"galeria_{uuid.uuid4().hex}.{ext}"
+    ruta = os.path.join(UPLOAD_DIR, nombre_archivo)
+    with open(ruta, "wb") as f:
+        f.write(archivo.file.read())
+    foto = models.GaleriaFontanero(
+        fontanero_id=fontanero.id,
+        url=f"/uploads/{nombre_archivo}",
+        descripcion=descripcion,
+    )
+    db.add(foto)
+    db.commit()
+    db.refresh(foto)
+    return foto
+
+@app.get("/fontaneros/{fontanero_id}/galeria", response_model=List[schemas.GaleriaRespuesta])
+def ver_galeria(fontanero_id: int, db: Session = Depends(get_db)):
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    return db.query(models.GaleriaFontanero).filter(
+        models.GaleriaFontanero.fontanero_id == fontanero.id
+    ).order_by(models.GaleriaFontanero.creado_en.desc()).all()
+
+@app.delete("/fontaneros/{fontanero_id}/galeria/{foto_id}")
+def eliminar_foto_galeria(
+    fontanero_id: int,
+    foto_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    foto = db.query(models.GaleriaFontanero).filter(
+        models.GaleriaFontanero.id == foto_id,
+        models.GaleriaFontanero.fontanero_id == fontanero.id,
+    ).first()
+    if not foto:
+        raise HTTPException(status_code=404, detail="Foto no encontrada")
+    if os.path.exists(foto.url.lstrip("/")):
+        os.remove(foto.url.lstrip("/"))
+    db.delete(foto)
+    db.commit()
+    return {"mensaje": "Foto eliminada"}
+
+# ─── ESTADÍSTICAS ──────────────────────────────────────────────────────────────
+
+@app.get("/fontaneros/{fontanero_id}/estadisticas", response_model=schemas.EstadisticasRespuesta)
+def ver_estadisticas(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+
+    servicios_pagados = db.query(models.Servicio).filter(
+        models.Servicio.fontanero_id == fontanero.id,
+        models.Servicio.estado == "pagado",
+    ).all()
+
+    trabajos_completados = len(servicios_pagados)
+    ingresos_totales = sum(s.precio for s in servicios_pagados if s.precio) * 0.95
+
+    aceptados = db.query(models.Servicio).filter(
+        models.Servicio.fontanero_id == fontanero.id,
+        models.Servicio.estado.in_(["aceptado", "precio_enviado", "pagado", "pago_pendiente"]),
+    ).count()
+    rechazados = db.query(models.Servicio).filter(
+        models.Servicio.fontanero_id == fontanero.id,
+        models.Servicio.estado == "rechazado",
+    ).count()
+    total = aceptados + rechazados
+    tasa_aceptacion = round(aceptados / total * 100, 1) if total > 0 else 100.0
+
+    return {
+        "trabajos_completados": trabajos_completados,
+        "ingresos_totales": round(ingresos_totales, 2),
+        "valoracion_media": fontanero.valoracion or 5.0,
+        "tasa_aceptacion": tasa_aceptacion,
+    }
