@@ -1467,3 +1467,44 @@ def admin_revisar_documento(
         _crear_notificacion(db, fontanero.usuario_id, f"Documento {msg}", f"Tu documento '{doc.tipo}' ha sido {msg}", "documento", doc_id)
     db.commit()
     return {"mensaje": f"Documento {estado}"}
+
+# ─── MENSAJES CHAT ────────────────────────────────────────────────────────────
+
+class MensajeCrear(BaseModel):
+    contenido: str
+    remitente_tipo: str
+
+@app.post("/servicios/{servicio_id}/mensajes")
+def enviar_mensaje(servicio_id: int, mensaje: MensajeCrear, db: Session = Depends(get_db)):
+    nuevo = models.Mensaje(
+        servicio_id=servicio_id,
+        emisor_id=1,
+        texto=mensaje.contenido,
+        leido=False,
+    )
+    db.add(nuevo)
+    db.commit()
+    db.refresh(nuevo)
+    return {
+        "id": nuevo.id,
+        "contenido": nuevo.texto,
+        "remitente_tipo": mensaje.remitente_tipo,
+        "remitente_nombre": "Usuario",
+        "creado_en": str(nuevo.creado_en),
+    }
+
+@app.get("/servicios/{servicio_id}/mensajes")
+def ver_mensajes(servicio_id: int, db: Session = Depends(get_db)):
+    mensajes = db.query(models.Mensaje).filter(
+        models.Mensaje.servicio_id == servicio_id
+    ).order_by(models.Mensaje.creado_en).all()
+    return [
+        {
+            "id": m.id,
+            "contenido": m.texto,
+            "remitente_tipo": "cliente",
+            "remitente_nombre": "Usuario",
+            "creado_en": str(m.creado_en),
+        }
+        for m in mensajes
+    ]
