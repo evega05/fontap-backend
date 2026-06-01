@@ -1508,3 +1508,46 @@ def ver_mensajes(servicio_id: int, db: Session = Depends(get_db)):
         }
         for m in mensajes
     ]
+# ─── CHAT GENERAL ─────────────────────────────────────────────────────────────
+
+class MensajeChatCrear(BaseModel):
+    contenido: str
+    remitente_tipo: str
+    remitente_nombre: Optional[str] = None
+
+@app.post("/chat/{chat_id}/mensajes")
+def enviar_mensaje_chat(chat_id: str, mensaje: MensajeChatCrear, db: Session = Depends(get_db)):
+    nuevo = models.Mensaje(
+        servicio_id=0,
+        emisor_id=1,
+        texto=f"{chat_id}||{mensaje.remitente_tipo}||{mensaje.remitente_nombre}||{mensaje.contenido}",
+        leido=False,
+    )
+    db.add(nuevo)
+    db.commit()
+    db.refresh(nuevo)
+    return {
+        "id": nuevo.id,
+        "contenido": mensaje.contenido,
+        "remitente_tipo": mensaje.remitente_tipo,
+        "remitente_nombre": mensaje.remitente_nombre,
+        "creado_en": str(nuevo.creado_en),
+    }
+
+@app.get("/chat/{chat_id}/mensajes")
+def ver_mensajes_chat(chat_id: str, db: Session = Depends(get_db)):
+    mensajes = db.query(models.Mensaje).filter(
+        models.Mensaje.texto.like(f"{chat_id}||%")
+    ).order_by(models.Mensaje.creado_en).all()
+    resultado = []
+    for m in mensajes:
+        partes = m.texto.split("||", 3)
+        if len(partes) == 4:
+            resultado.append({
+                "id": m.id,
+                "contenido": partes[3],
+                "remitente_tipo": partes[1],
+                "remitente_nombre": partes[2],
+                "creado_en": str(m.creado_en),
+            })
+    return resultado
