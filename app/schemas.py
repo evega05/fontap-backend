@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, EmailStr
+from typing import Optional, Literal
 import datetime
 
 class Token(BaseModel):
@@ -12,13 +12,13 @@ class Token(BaseModel):
 
 class UsuarioRegistro(BaseModel):
     nombre: str
-    email: str
+    email: EmailStr
     telefono: str
     password: str
-    tipo: str = "cliente"
+    tipo: Literal["cliente", "fontanero"] = "cliente"
 
 class UsuarioLogin(BaseModel):
-    email: str
+    email: EmailStr
     password: str
 
 class UsuarioRespuesta(BaseModel):
@@ -27,7 +27,6 @@ class UsuarioRespuesta(BaseModel):
     email: str
     telefono: str
     tipo: str
-
     class Config:
         from_attributes = True
 
@@ -39,7 +38,6 @@ class FontaneroRespuesta(BaseModel):
     disponible_24h: bool = False
     valoracion: Optional[float] = None
     foto_url: Optional[str] = None
-
     class Config:
         from_attributes = True
 
@@ -59,7 +57,6 @@ class ServicioRespuesta(BaseModel):
     estado: str
     precio: Optional[float] = None
     fecha: Optional[datetime.datetime] = None
-
     class Config:
         from_attributes = True
 
@@ -75,7 +72,6 @@ class ServicioFontaneroRespuesta(BaseModel):
     precio: float
     duracion_minutos: int
     activo: bool
-
     class Config:
         from_attributes = True
 
@@ -92,7 +88,6 @@ class HorarioBaseRespuesta(BaseModel):
     hora_inicio: str
     hora_fin: str
     intervalo_minutos: int
-
     class Config:
         from_attributes = True
 
@@ -109,6 +104,5 @@ class BloqueoRespuesta(BaseModel):
     hora_inicio: str
     hora_fin: str
     motivo: Optional[str] = None
-
     class Config:
         from_attributes = True

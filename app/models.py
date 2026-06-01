@@ -1,24 +1,10 @@
-# ══════════════════════════════════════════════════════════════════
-# PARCHE models.py — añade estos campos a los modelos existentes
-# Si ya tienes models.py, añade solo los campos marcados con ← NUEVO
-# ══════════════════════════════════════════════════════════════════
-
-# En clase Fontanero, añadir:
-#   disponible_24h = Column(Boolean, default=False)    ← NUEVO
-
-# En clase Servicio, añadir:
-#   precio = Column(Float, nullable=True)              ← NUEVO (si no existe)
-#   metodo_pago = Column(String, nullable=True)        ← NUEVO
-#   estado default cambiar a "pendiente"               ← VERIFICAR
-
-# ──────────────────────────────────────────────────────────────────
-# MODELO COMPLETO SUGERIDO (reemplaza tu models.py entero):
-# ──────────────────────────────────────────────────────────────────
-
 from sqlalchemy import Column, Integer, String, Boolean, Float, DateTime, ForeignKey, Text
 from sqlalchemy.orm import relationship
 from .database import Base
 import datetime
+
+def utcnow():
+    return datetime.datetime.now(datetime.timezone.utc)
 
 class Usuario(Base):
     __tablename__ = "usuarios"
@@ -27,8 +13,8 @@ class Usuario(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     telefono = Column(String)
     password_hash = Column(String, nullable=False)
-    tipo = Column(String, default="cliente")       # "cliente" | "fontanero"
-    creado_en = Column(DateTime, default=datetime.datetime.utcnow)
+    tipo = Column(String, default="cliente")
+    creado_en = Column(DateTime, default=utcnow)
 
 class Fontanero(Base):
     __tablename__ = "fontaneros"
@@ -38,7 +24,7 @@ class Fontanero(Base):
     telefono = Column(String)
     zona = Column(String, default="Bilbao")
     disponible = Column(Boolean, default=True)
-    disponible_24h = Column(Boolean, default=False)    # ← NUEVO
+    disponible_24h = Column(Boolean, default=False)
     valoracion = Column(Float, default=5.0)
     foto_url = Column(String, nullable=True)
 
@@ -50,11 +36,11 @@ class Servicio(Base):
     tipo = Column(String)
     descripcion = Column(Text, nullable=True)
     urgente = Column(Boolean, default=False)
-    estado = Column(String, default="pendiente")   # pendiente | aceptado | precio_enviado | pagado | rechazado
-    precio = Column(Float, nullable=True)          # ← NUEVO: lo pone el fontanero
-    metodo_pago = Column(String, nullable=True)    # ← NUEVO
+    estado = Column(String, default="pendiente")
+    precio = Column(Float, nullable=True)
+    metodo_pago = Column(String, nullable=True)
     fecha = Column(DateTime, nullable=True)
-    creado_en = Column(DateTime, default=datetime.datetime.utcnow)
+    creado_en = Column(DateTime, default=utcnow)
 
 class ServicioFontanero(Base):
     __tablename__ = "servicios_fontanero"
@@ -69,7 +55,7 @@ class HorarioBase(Base):
     __tablename__ = "horarios_base"
     id = Column(Integer, primary_key=True, index=True)
     fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
-    dia_semana = Column(Integer)   # 0=lunes … 6=domingo
+    dia_semana = Column(Integer)
     hora_inicio = Column(String)
     hora_fin = Column(String)
     intervalo_minutos = Column(Integer, default=60)

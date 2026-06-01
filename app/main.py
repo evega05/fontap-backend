@@ -18,11 +18,36 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ─── HELPERS ───────────────────────────────────────────────────────────────────
+
+def get_or_create_fontanero(db: Session, usuario_id: int):
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == usuario_id
+    ).first()
+    if fontanero:
+        return fontanero
+    usuario_obj = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
+    if usuario_obj and usuario_obj.tipo == "fontanero":
+        fontanero = models.Fontanero(
+            usuario_id=usuario_id,
+            nombre=usuario_obj.nombre,
+            telefono=usuario_obj.telefono,
+            disponible=True,
+            disponible_24h=False,
+            valoracion=5.0,
+            zona="Bilbao",
+        )
+        db.add(fontanero)
+        db.commit()
+        db.refresh(fontanero)
+        return fontanero
+    return None
+
+# ─── AUTH ──────────────────────────────────────────────────────────────────────
+
 @app.get("/")
 def inicio():
     return {"mensaje": "FonTap API funcionando"}
-
-# ─── AUTH ──────────────────────────────────────────────────────────────────────
 
 @app.post("/registro", response_model=schemas.Token)
 def registrar_usuario(usuario: schemas.UsuarioRegistro, db: Session = Depends(get_db)):
@@ -34,38 +59,22 @@ def registrar_usuario(usuario: schemas.UsuarioRegistro, db: Session = Depends(ge
         email=usuario.email,
         telefono=usuario.telefono,
         password_hash=auth.hashear_password(usuario.password),
-        tipo=usuario.tipo
+        tipo=usuario.tipo,
     )
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
 
-    # ✅ FIX: Si es fontanero, crear entrada en tabla Fontanero automáticamente
     if usuario.tipo == "fontanero":
-        fontanero_existente = db.query(models.Fontanero).filter(
-            models.Fontanero.usuario_id == nuevo.id
-        ).first()
-        if not fontanero_existente:
-            nuevo_fontanero = models.Fontanero(
-                usuario_id=nuevo.id,
-                nombre=nuevo.nombre,
-                telefono=nuevo.telefono,
-                disponible=True,
-                disponible_24h=False,
-                valoracion=5.0,
-                zona="Bilbao",
-            )
-            db.add(nuevo_fontanero)
-            db.commit()
-            db.refresh(nuevo_fontanero)
+        get_or_create_fontanero(db, nuevo.id)
 
-    token = auth.crear_token({"sub": nuevo.email, "tipo": nuevo.tipo})
+    token = auth.crear_token({"sub": nuevo.email, "tipo": nuevo.tipo, "id": nuevo.id})
     return {
         "access_token": token,
         "token_type": "bearer",
         "tipo_usuario": nuevo.tipo,
         "nombre": nuevo.nombre,
-        "id": nuevo.id,           # ← NUEVO: devolver id para el frontend
+        "id": nuevo.id,
         "email": nuevo.email,
     }
 
@@ -74,13 +83,13 @@ def login(datos: schemas.UsuarioLogin, db: Session = Depends(get_db)):
     usuario = db.query(models.Usuario).filter(models.Usuario.email == datos.email).first()
     if not usuario or not auth.verificar_password(datos.password, usuario.password_hash):
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
-    token = auth.crear_token({"sub": usuario.email, "tipo": usuario.tipo})
+    token = auth.crear_token({"sub": usuario.email, "tipo": usuario.tipo, "id": usuario.id})
     return {
         "access_token": token,
         "token_type": "bearer",
         "tipo_usuario": usuario.tipo,
         "nombre": usuario.nombre,
-        "id": usuario.id,         # ← NUEVO: devolver id
+        "id": usuario.id,
         "email": usuario.email,
     }
 
@@ -90,17 +99,20 @@ def login(datos: schemas.UsuarioLogin, db: Session = Depends(get_db)):
 def listar_fontaneros(db: Session = Depends(get_db)):
     return db.query(models.Fontanero).filter(models.Fontanero.disponible == True).all()
 
-# ✅ FIX: Endpoint de disponibilidad (incluye 24h)
 class DisponibilidadUpdate(BaseModel):
     disponible: bool
     disponible_24h: Optional[bool] = None
 
 @app.put("/fontaneros/{fontanero_id}/disponibilidad")
-def actualizar_disponibilidad(fontanero_id: int, datos: DisponibilidadUpdate, db: Session = Depends(get_db)):
-    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
-    if not fontanero:
-        # Intentar buscar por id directo
-        fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+def actualizar_disponibilidad(
+    fontanero_id: int,
+    datos: DisponibilidadUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
     fontanero.disponible = datos.disponible
@@ -109,55 +121,26 @@ def actualizar_disponibilidad(fontanero_id: int, datos: DisponibilidadUpdate, db
     db.commit()
     return {"mensaje": "Disponibilidad actualizada"}
 
-# ✅ FIX: Endpoint para que fontanero vea sus solicitudes (polling desde app)
 @app.get("/fontaneros/{fontanero_id}/solicitudes")
-def ver_solicitudes_fontanero(fontanero_id: int, db: Session = Depends(get_db)):
-    """
-    Devuelve todas las solicitudes pendientes (sin fontanero asignado) 
-    + las ya asignadas a este fontanero.
-    """
-    fontanero = db.query(models.Fontanero).filter(
-        models.Fontanero.usuario_id == fontanero_id
-    ).first()
+def ver_solicitudes_fontanero(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = get_or_create_fontanero(db, fontanero_id)
     if not fontanero:
-        fontanero = db.query(models.Fontanero).filter(
-            models.Fontanero.id == fontanero_id
-        ).first()
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
 
-    # Si no existe en tabla fontaneros, crearla automáticamente
-    if not fontanero:
-        usuario_obj = db.query(models.Usuario).filter(
-            models.Usuario.id == fontanero_id
-        ).first()
-        if usuario_obj and usuario_obj.tipo == "fontanero":
-            fontanero = models.Fontanero(
-                usuario_id=fontanero_id,
-                nombre=usuario_obj.nombre,
-                telefono=usuario_obj.telefono,
-                disponible=True,
-                disponible_24h=False,
-                valoracion=5.0,
-                zona="Bilbao",
-            )
-            db.add(fontanero)
-            db.commit()
-            db.refresh(fontanero)
-
-    # Solicitudes pendientes (sin fontanero aún)
     pendientes = db.query(models.Servicio).filter(
         models.Servicio.estado == "pendiente",
-        models.Servicio.fontanero_id == None
+        models.Servicio.fontanero_id == None,
     ).all()
 
-    # Solicitudes ya aceptadas por este fontanero
-    propias = []
-    if fontanero:
-        propias = db.query(models.Servicio).filter(
-            models.Servicio.fontanero_id == fontanero.id,
-            models.Servicio.estado.in_(["aceptado", "completado", "pagado"])
-        ).all()
+    propias = db.query(models.Servicio).filter(
+        models.Servicio.fontanero_id == fontanero.id,
+        models.Servicio.estado.in_(["aceptado", "completado", "pagado"]),
+    ).all()
 
-    # Enriquecer con nombre del cliente
     resultado = []
     for s in pendientes + propias:
         cliente = db.query(models.Usuario).filter(models.Usuario.id == s.cliente_id).first()
@@ -177,7 +160,12 @@ def ver_solicitudes_fontanero(fontanero_id: int, db: Session = Depends(get_db)):
 # ─── SERVICIOS ─────────────────────────────────────────────────────────────────
 
 @app.post("/servicios", response_model=schemas.ServicioRespuesta)
-def crear_servicio(servicio: schemas.ServicioCrear, cliente_id: int, db: Session = Depends(get_db)):
+def crear_servicio(
+    servicio: schemas.ServicioCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    cliente_id = current_user["id"]
     nuevo = models.Servicio(
         cliente_id=cliente_id,
         tipo=servicio.tipo,
@@ -185,16 +173,19 @@ def crear_servicio(servicio: schemas.ServicioCrear, cliente_id: int, db: Session
         urgente=servicio.urgente,
         fecha=servicio.fecha,
         estado="pendiente",
-        precio=None,              # ← precio empieza en None hasta que fontanero lo envíe
+        precio=None,
     )
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
     return nuevo
 
-# ✅ FIX: Obtener detalle de un servicio (para que cliente haga polling del precio)
 @app.get("/servicios/{servicio_id}")
-def ver_servicio(servicio_id: int, db: Session = Depends(get_db)):
+def ver_servicio(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
@@ -204,29 +195,36 @@ def ver_servicio(servicio_id: int, db: Session = Depends(get_db)):
         "descripcion": servicio.descripcion,
         "urgente": servicio.urgente,
         "estado": servicio.estado,
-        "precio": servicio.precio,     # ← el cliente lo ve aquí
+        "precio": servicio.precio,
         "fecha": str(servicio.fecha) if servicio.fecha else None,
     }
 
 @app.put("/servicios/{servicio_id}/aceptar")
-def aceptar_servicio(servicio_id: int, fontanero_id: int, db: Session = Depends(get_db)):
+def aceptar_servicio(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero_usuario_id = current_user["id"]
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
-
-    # Buscar fontanero por usuario_id
     fontanero = db.query(models.Fontanero).filter(
-        models.Fontanero.usuario_id == fontanero_id
+        models.Fontanero.usuario_id == fontanero_usuario_id
     ).first()
-    fontanero_real_id = fontanero.id if fontanero else fontanero_id
-
-    servicio.fontanero_id = fontanero_real_id
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    servicio.fontanero_id = fontanero.id
     servicio.estado = "aceptado"
     db.commit()
     return {"mensaje": "Servicio aceptado"}
 
 @app.put("/servicios/{servicio_id}/rechazar")
-def rechazar_servicio(servicio_id: int, db: Session = Depends(get_db)):
+def rechazar_servicio(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
@@ -234,12 +232,16 @@ def rechazar_servicio(servicio_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"mensaje": "Servicio rechazado"}
 
-# ✅ FIX: Fontanero envía el precio final al cliente
 class PrecioUpdate(BaseModel):
     precio: float
 
 @app.put("/servicios/{servicio_id}/precio")
-def enviar_precio(servicio_id: int, datos: PrecioUpdate, db: Session = Depends(get_db)):
+def enviar_precio(
+    servicio_id: int,
+    datos: PrecioUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
@@ -248,12 +250,16 @@ def enviar_precio(servicio_id: int, datos: PrecioUpdate, db: Session = Depends(g
     db.commit()
     return {"mensaje": "Precio enviado al cliente", "precio": datos.precio}
 
-# ✅ FIX: Cliente confirma el pago
 class PagoUpdate(BaseModel):
     metodo: str
 
 @app.put("/servicios/{servicio_id}/pagar")
-def confirmar_pago(servicio_id: int, datos: PagoUpdate, db: Session = Depends(get_db)):
+def confirmar_pago(
+    servicio_id: int,
+    datos: PagoUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
@@ -265,7 +271,11 @@ def confirmar_pago(servicio_id: int, datos: PagoUpdate, db: Session = Depends(ge
     return {"mensaje": "Pago registrado", "precio": servicio.precio, "metodo": datos.metodo}
 
 @app.put("/servicios/{servicio_id}/confirmar_efectivo")
-def confirmar_efectivo(servicio_id: int, db: Session = Depends(get_db)):
+def confirmar_efectivo(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
@@ -273,16 +283,31 @@ def confirmar_efectivo(servicio_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"mensaje": "Efectivo confirmado"}
 
-# ─── HORARIOS / BLOQUEOS / SERVICIOS FONTANERO (existentes) ───────────────────
+@app.get("/clientes/{cliente_id}/servicios")
+def ver_servicios_cliente(
+    cliente_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    return db.query(models.Servicio).filter(
+        models.Servicio.cliente_id == cliente_id
+    ).order_by(models.Servicio.id.desc()).all()
+
+# ─── HORARIOS / BLOQUEOS / SERVICIOS FONTANERO ────────────────────────────────
 
 @app.post("/fontaneros/{fontanero_id}/horario", response_model=schemas.HorarioBaseRespuesta)
-def crear_horario(fontanero_id: int, horario: schemas.HorarioBaseCrear, db: Session = Depends(get_db)):
+def crear_horario(
+    fontanero_id: int,
+    horario: schemas.HorarioBaseCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
     nuevo = models.HorarioBase(
         fontanero_id=fontanero_id,
         dia_semana=horario.dia_semana,
         hora_inicio=horario.hora_inicio,
         hora_fin=horario.hora_fin,
-        intervalo_minutos=horario.intervalo_minutos
+        intervalo_minutos=horario.intervalo_minutos,
     )
     db.add(nuevo)
     db.commit()
@@ -291,16 +316,23 @@ def crear_horario(fontanero_id: int, horario: schemas.HorarioBaseCrear, db: Sess
 
 @app.get("/fontaneros/{fontanero_id}/horario", response_model=List[schemas.HorarioBaseRespuesta])
 def ver_horario(fontanero_id: int, db: Session = Depends(get_db)):
-    return db.query(models.HorarioBase).filter(models.HorarioBase.fontanero_id == fontanero_id).all()
+    return db.query(models.HorarioBase).filter(
+        models.HorarioBase.fontanero_id == fontanero_id
+    ).all()
 
 @app.post("/fontaneros/{fontanero_id}/bloqueos", response_model=schemas.BloqueoRespuesta)
-def crear_bloqueo(fontanero_id: int, bloqueo: schemas.BloqueoCrear, db: Session = Depends(get_db)):
+def crear_bloqueo(
+    fontanero_id: int,
+    bloqueo: schemas.BloqueoCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
     nuevo = models.BloqueoHorario(
         fontanero_id=fontanero_id,
         fecha=bloqueo.fecha,
         hora_inicio=bloqueo.hora_inicio,
         hora_fin=bloqueo.hora_fin,
-        motivo=bloqueo.motivo
+        motivo=bloqueo.motivo,
     )
     db.add(nuevo)
     db.commit()
@@ -308,14 +340,25 @@ def crear_bloqueo(fontanero_id: int, bloqueo: schemas.BloqueoCrear, db: Session 
     return nuevo
 
 @app.get("/fontaneros/{fontanero_id}/bloqueos", response_model=List[schemas.BloqueoRespuesta])
-def ver_bloqueos(fontanero_id: int, db: Session = Depends(get_db)):
-    return db.query(models.BloqueoHorario).filter(models.BloqueoHorario.fontanero_id == fontanero_id).all()
+def ver_bloqueos(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    return db.query(models.BloqueoHorario).filter(
+        models.BloqueoHorario.fontanero_id == fontanero_id
+    ).all()
 
 @app.delete("/fontaneros/{fontanero_id}/bloqueos/{bloqueo_id}")
-def eliminar_bloqueo(fontanero_id: int, bloqueo_id: int, db: Session = Depends(get_db)):
+def eliminar_bloqueo(
+    fontanero_id: int,
+    bloqueo_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
     bloqueo = db.query(models.BloqueoHorario).filter(
         models.BloqueoHorario.id == bloqueo_id,
-        models.BloqueoHorario.fontanero_id == fontanero_id
+        models.BloqueoHorario.fontanero_id == fontanero_id,
     ).first()
     if not bloqueo:
         raise HTTPException(status_code=404, detail="Bloqueo no encontrado")
@@ -324,12 +367,17 @@ def eliminar_bloqueo(fontanero_id: int, bloqueo_id: int, db: Session = Depends(g
     return {"mensaje": "Bloqueo eliminado"}
 
 @app.post("/fontaneros/{fontanero_id}/servicios", response_model=schemas.ServicioFontaneroRespuesta)
-def añadir_servicio(fontanero_id: int, servicio: schemas.ServicioFontaneroCrear, db: Session = Depends(get_db)):
+def añadir_servicio(
+    fontanero_id: int,
+    servicio: schemas.ServicioFontaneroCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
     nuevo = models.ServicioFontanero(
         fontanero_id=fontanero_id,
         nombre=servicio.nombre,
         precio=servicio.precio,
-        duracion_minutos=servicio.duracion_minutos
+        duracion_minutos=servicio.duracion_minutos,
     )
     db.add(nuevo)
     db.commit()
@@ -340,33 +388,22 @@ def añadir_servicio(fontanero_id: int, servicio: schemas.ServicioFontaneroCrear
 def ver_servicios_fontanero(fontanero_id: int, db: Session = Depends(get_db)):
     return db.query(models.ServicioFontanero).filter(
         models.ServicioFontanero.fontanero_id == fontanero_id,
-        models.ServicioFontanero.activo == True
+        models.ServicioFontanero.activo == True,
     ).all()
 
 @app.delete("/fontaneros/{fontanero_id}/servicios/{servicio_id}")
-def eliminar_servicio(fontanero_id: int, servicio_id: int, db: Session = Depends(get_db)):
+def eliminar_servicio(
+    fontanero_id: int,
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
     servicio = db.query(models.ServicioFontanero).filter(
         models.ServicioFontanero.id == servicio_id,
-        models.ServicioFontanero.fontanero_id == fontanero_id
+        models.ServicioFontanero.fontanero_id == fontanero_id,
     ).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
     servicio.activo = False
     db.commit()
     return {"mensaje": "Servicio eliminado"}
-
-@app.get("/clientes/{cliente_id}/servicios")
-def ver_servicios_cliente(cliente_id: int, db: Session = Depends(get_db)):
-    servicios = db.query(models.Servicio).filter(
-        models.Servicio.cliente_id == cliente_id
-    ).order_by(models.Servicio.id.desc()).all()
-    return servicios
-
-@app.put("/servicios/{servicio_id}/confirmar_efectivo")
-def confirmar_efectivo(servicio_id: int, db: Session = Depends(get_db)):
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio:
-        raise HTTPException(status_code=404, detail="Servicio no encontrado")
-    servicio.estado = "pagado"
-    db.commit()
-    return {"mensaje": "Efectivo confirmado"}
