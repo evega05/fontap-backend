@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 import datetime
 
 class Token(BaseModel):
@@ -15,7 +15,7 @@ class UsuarioRegistro(BaseModel):
     email: EmailStr
     telefono: str
     password: str
-    tipo: Literal["cliente", "fontanero"] = "cliente"
+    tipo: Literal["cliente", "fontanero", "admin", "administrador_fincas"] = "cliente"
 
 class UsuarioLogin(BaseModel):
     email: EmailStr
@@ -42,6 +42,9 @@ class FontaneroRespuesta(BaseModel):
     especialidades: Optional[str] = None
     vacaciones_desde: Optional[datetime.datetime] = None
     vacaciones_hasta: Optional[datetime.datetime] = None
+    gremio: Optional[str] = None
+    verificado: bool = False
+    num_trabajos: int = 0
     class Config:
         from_attributes = True
 
@@ -50,6 +53,7 @@ class FontaneroActualizar(BaseModel):
     descripcion: Optional[str] = None
     especialidades: Optional[str] = None
     disponible_24h: Optional[bool] = None
+    gremio: Optional[str] = None
 
 class VacacionesCrear(BaseModel):
     desde: datetime.datetime
@@ -78,6 +82,7 @@ class ServicioCrear(BaseModel):
     descripcion: Optional[str] = None
     urgente: bool = False
     fecha: Optional[datetime.datetime] = None
+    fontanero_id: Optional[int] = None
 
 class ServicioRespuesta(BaseModel):
     id: int
@@ -86,11 +91,16 @@ class ServicioRespuesta(BaseModel):
     tipo: str
     descripcion: Optional[str] = None
     urgente: bool
+    urgencia_ia: Optional[str] = None
     estado: str
     precio: Optional[float] = None
     fecha: Optional[datetime.datetime] = None
+    eta_minutos: Optional[int] = None
     class Config:
         from_attributes = True
+
+class ETAUpdate(BaseModel):
+    eta_minutos: int
 
 class ServicioFontaneroCrear(BaseModel):
     nombre: str
@@ -175,3 +185,100 @@ class NotificacionRespuesta(BaseModel):
     creado_en: datetime.datetime
     class Config:
         from_attributes = True
+
+class FavoritoRespuesta(BaseModel):
+    id: int
+    cliente_id: int
+    fontanero_id: int
+    creado_en: datetime.datetime
+    class Config:
+        from_attributes = True
+
+class OfertaCrear(BaseModel):
+    precio: float
+    mensaje: Optional[str] = None
+
+class OfertaRespuesta(BaseModel):
+    id: int
+    servicio_id: int
+    fontanero_id: int
+    precio: float
+    mensaje: Optional[str] = None
+    estado: str
+    creado_en: datetime.datetime
+    class Config:
+        from_attributes = True
+
+class ResenaCrear(BaseModel):
+    puntualidad: float
+    calidad: float
+    precio_justo: float
+    trato: float
+    comentario: Optional[str] = None
+
+class ResenaRespuesta(BaseModel):
+    id: int
+    servicio_id: int
+    cliente_id: int
+    fontanero_id: int
+    puntualidad: float
+    calidad: float
+    precio_justo: float
+    trato: float
+    comentario: Optional[str] = None
+    creado_en: datetime.datetime
+    class Config:
+        from_attributes = True
+
+class CitaCrear(BaseModel):
+    titulo: str
+    fecha_inicio: datetime.datetime
+    fecha_fin: datetime.datetime
+    servicio_id: Optional[int] = None
+
+class CitaRespuesta(BaseModel):
+    id: int
+    fontanero_id: int
+    servicio_id: Optional[int] = None
+    titulo: str
+    fecha_inicio: datetime.datetime
+    fecha_fin: datetime.datetime
+    class Config:
+        from_attributes = True
+
+class InmuebleCrear(BaseModel):
+    nombre: str
+    direccion: str
+    ciudad: str = "Bilbao"
+
+class InmuebleRespuesta(BaseModel):
+    id: int
+    administrador_id: int
+    nombre: str
+    direccion: str
+    ciudad: str
+    creado_en: datetime.datetime
+    class Config:
+        from_attributes = True
+
+class DocumentoCrear(BaseModel):
+    tipo: str
+
+class DocumentoRespuesta(BaseModel):
+    id: int
+    fontanero_id: int
+    tipo: str
+    url: str
+    estado: str
+    creado_en: datetime.datetime
+    class Config:
+        from_attributes = True
+
+class AdminStats(BaseModel):
+    total_usuarios: int
+    total_fontaneros: int
+    total_clientes: int
+    total_servicios: int
+    servicios_pendientes: int
+    servicios_completados: int
+    ingresos_plataforma: float

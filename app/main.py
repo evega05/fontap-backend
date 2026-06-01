@@ -818,3 +818,628 @@ def ver_estadisticas(
         "valoracion_media": fontanero.valoracion or 5.0,
         "tasa_aceptacion": tasa_aceptacion,
     }
+
+# ─── BÚSQUEDA Y FILTROS ────────────────────────────────────────────────────────
+
+@app.get("/buscar/fontaneros", response_model=List[schemas.FontaneroRespuesta])
+def buscar_fontaneros(
+    zona: Optional[str] = None,
+    gremio: Optional[str] = None,
+    disponible_24h: Optional[bool] = None,
+    verificado: Optional[bool] = None,
+    db: Session = Depends(get_db),
+):
+    q = db.query(models.Fontanero).filter(models.Fontanero.disponible == True)
+    if zona:
+        q = q.filter(models.Fontanero.zona.ilike(f"%{zona}%"))
+    if gremio:
+        q = q.filter(models.Fontanero.gremio == gremio)
+    if disponible_24h is not None:
+        q = q.filter(models.Fontanero.disponible_24h == disponible_24h)
+    if verificado is not None:
+        q = q.filter(models.Fontanero.verificado == verificado)
+    return q.order_by(models.Fontanero.valoracion.desc()).all()
+
+# ─── ETA ───────────────────────────────────────────────────────────────────────
+
+@app.put("/servicios/{servicio_id}/eta")
+def actualizar_eta(
+    servicio_id: int,
+    datos: schemas.ETAUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    servicio.eta_minutos = datos.eta_minutos
+    _crear_notificacion(db, servicio.cliente_id, "Fontanero en camino", f"Llegará en aproximadamente {datos.eta_minutos} minutos", "eta", servicio_id)
+    db.commit()
+    return {"mensaje": "ETA actualizado", "eta_minutos": datos.eta_minutos}
+
+# ─── IA CLASIFICACIÓN URGENCIA ────────────────────────────────────────────────
+
+PALABRAS_CRITICA = ["inundación", "inundacion", "rotura", "reventado", "agua por todas", "escape de gas", "gas"]
+PALABRAS_ALTA = ["fuga", "goteo fuerte", "sin agua", "tubería rota", "tuberia rota", "urgente"]
+PALABRAS_MEDIA = ["goteo", "grifo", "presión baja", "presion baja", "atasco"]
+
+def _clasificar_urgencia(texto: str) -> str:
+    t = (texto or "").lower()
+    if any(p in t for p in PALABRAS_CRITICA):
+        return "critica"
+    if any(p in t for p in PALABRAS_ALTA):
+        return "alta"
+    if any(p in t for p in PALABRAS_MEDIA):
+        return "media"
+    return "baja"
+
+@app.post("/servicios/{servicio_id}/clasificar-urgencia")
+def clasificar_urgencia(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    nivel = _clasificar_urgencia(f"{servicio.tipo} {servicio.descripcion or ''}")
+    servicio.urgencia_ia = nivel
+    db.commit()
+    return {"urgencia_ia": nivel}
+
+# ─── FAVORITOS ─────────────────────────────────────────────────────────────────
+
+@app.post("/clientes/{cliente_id}/favoritos/{fontanero_id}")
+def agregar_favorito(
+    cliente_id: int,
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    existe = db.query(models.Favorito).filter(
+        models.Favorito.cliente_id == cliente_id,
+        models.Favorito.fontanero_id == fontanero_id,
+    ).first()
+    if existe:
+        return {"mensaje": "Ya está en favoritos"}
+    db.add(models.Favorito(cliente_id=cliente_id, fontanero_id=fontanero_id))
+    db.commit()
+    return {"mensaje": "Añadido a favoritos"}
+
+@app.delete("/clientes/{cliente_id}/favoritos/{fontanero_id}")
+def eliminar_favorito(
+    cliente_id: int,
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fav = db.query(models.Favorito).filter(
+        models.Favorito.cliente_id == cliente_id,
+        models.Favorito.fontanero_id == fontanero_id,
+    ).first()
+    if fav:
+        db.delete(fav)
+        db.commit()
+    return {"mensaje": "Eliminado de favoritos"}
+
+@app.get("/clientes/{cliente_id}/favoritos", response_model=List[schemas.FontaneroRespuesta])
+def listar_favoritos(
+    cliente_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    favs = db.query(models.Favorito).filter(models.Favorito.cliente_id == cliente_id).all()
+    ids = [f.fontanero_id for f in favs]
+    return db.query(models.Fontanero).filter(models.Fontanero.id.in_(ids)).all()
+
+# ─── SISTEMA DE LICITACIÓN (OFERTAS) ──────────────────────────────────────────
+
+@app.post("/servicios/{servicio_id}/ofertas", response_model=schemas.OfertaRespuesta)
+def crear_oferta(
+    servicio_id: int,
+    datos: schemas.OfertaCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == current_user["id"]
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    existente = db.query(models.Oferta).filter(
+        models.Oferta.servicio_id == servicio_id,
+        models.Oferta.fontanero_id == fontanero.id,
+    ).first()
+    if existente:
+        existente.precio = datos.precio
+        existente.mensaje = datos.mensaje
+        db.commit()
+        db.refresh(existente)
+        return existente
+    oferta = models.Oferta(servicio_id=servicio_id, fontanero_id=fontanero.id, precio=datos.precio, mensaje=datos.mensaje)
+    db.add(oferta)
+    _crear_notificacion(db, servicio.cliente_id, "Nueva oferta recibida", f"Un profesional ofrece realizar el servicio por {datos.precio}€", "oferta", servicio_id)
+    db.commit()
+    db.refresh(oferta)
+    return oferta
+
+@app.get("/servicios/{servicio_id}/ofertas", response_model=List[schemas.OfertaRespuesta])
+def listar_ofertas(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    return db.query(models.Oferta).filter(
+        models.Oferta.servicio_id == servicio_id,
+        models.Oferta.estado == "pendiente",
+    ).order_by(models.Oferta.precio).all()
+
+@app.put("/servicios/{servicio_id}/ofertas/{oferta_id}/aceptar")
+def aceptar_oferta(
+    servicio_id: int,
+    oferta_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    oferta = db.query(models.Oferta).filter(
+        models.Oferta.id == oferta_id,
+        models.Oferta.servicio_id == servicio_id,
+    ).first()
+    if not oferta:
+        raise HTTPException(status_code=404, detail="Oferta no encontrada")
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    servicio.fontanero_id = oferta.fontanero_id
+    servicio.precio = oferta.precio
+    servicio.estado = "aceptado"
+    oferta.estado = "aceptada"
+    db.query(models.Oferta).filter(
+        models.Oferta.servicio_id == servicio_id,
+        models.Oferta.id != oferta_id,
+    ).update({"estado": "rechazada"})
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == oferta.fontanero_id).first()
+    if fontanero and fontanero.usuario_id:
+        _crear_notificacion(db, fontanero.usuario_id, "¡Tu oferta fue aceptada!", f"El cliente aceptó tu oferta de {oferta.precio}€", "oferta_aceptada", servicio_id)
+    db.commit()
+    return {"mensaje": "Oferta aceptada"}
+
+# ─── VALORACIÓN DETALLADA ─────────────────────────────────────────────────────
+
+@app.post("/servicios/{servicio_id}/resena", response_model=schemas.ResenaRespuesta)
+def crear_resena(
+    servicio_id: int,
+    datos: schemas.ResenaCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    if servicio.estado != "pagado":
+        raise HTTPException(status_code=400, detail="Solo se puede reseñar servicios pagados")
+    if servicio.cliente_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Solo el cliente puede reseñar")
+    existente = db.query(models.Resena).filter(models.Resena.servicio_id == servicio_id).first()
+    if existente:
+        raise HTTPException(status_code=400, detail="Ya existe una reseña para este servicio")
+    media = round((datos.puntualidad + datos.calidad + datos.precio_justo + datos.trato) / 4, 2)
+    resena = models.Resena(
+        servicio_id=servicio_id,
+        cliente_id=current_user["id"],
+        fontanero_id=servicio.fontanero_id,
+        puntualidad=datos.puntualidad,
+        calidad=datos.calidad,
+        precio_justo=datos.precio_justo,
+        trato=datos.trato,
+        comentario=datos.comentario,
+    )
+    db.add(resena)
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
+    if fontanero:
+        resenas = db.query(models.Resena).filter(models.Resena.fontanero_id == fontanero.id).all()
+        total = sum((r.puntualidad + r.calidad + r.precio_justo + r.trato) / 4 for r in resenas)
+        fontanero.valoracion = round((total + media) / (len(resenas) + 1), 2)
+        fontanero.num_trabajos = (fontanero.num_trabajos or 0) + 1
+        if fontanero.usuario_id:
+            _crear_notificacion(db, fontanero.usuario_id, "Nueva reseña recibida", f"Has recibido una valoración de {media}/5", "resena", servicio_id)
+    db.commit()
+    db.refresh(resena)
+    return resena
+
+@app.get("/fontaneros/{fontanero_id}/resenas", response_model=List[schemas.ResenaRespuesta])
+def ver_resenas(fontanero_id: int, db: Session = Depends(get_db)):
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    return db.query(models.Resena).filter(
+        models.Resena.fontanero_id == fontanero.id
+    ).order_by(models.Resena.creado_en.desc()).all()
+
+# ─── CALENDARIO INTERNO ───────────────────────────────────────────────────────
+
+@app.post("/fontaneros/{fontanero_id}/citas", response_model=schemas.CitaRespuesta)
+def crear_cita(
+    fontanero_id: int,
+    datos: schemas.CitaCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    cita = models.Cita(
+        fontanero_id=fontanero.id,
+        servicio_id=datos.servicio_id,
+        titulo=datos.titulo,
+        fecha_inicio=datos.fecha_inicio,
+        fecha_fin=datos.fecha_fin,
+    )
+    db.add(cita)
+    db.commit()
+    db.refresh(cita)
+    return cita
+
+@app.get("/fontaneros/{fontanero_id}/citas", response_model=List[schemas.CitaRespuesta])
+def ver_citas(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    return db.query(models.Cita).filter(
+        models.Cita.fontanero_id == fontanero.id
+    ).order_by(models.Cita.fecha_inicio).all()
+
+@app.delete("/fontaneros/{fontanero_id}/citas/{cita_id}")
+def eliminar_cita(
+    fontanero_id: int,
+    cita_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    cita = db.query(models.Cita).filter(
+        models.Cita.id == cita_id,
+        models.Cita.fontanero_id == fontanero.id,
+    ).first()
+    if not cita:
+        raise HTTPException(status_code=404, detail="Cita no encontrada")
+    db.delete(cita)
+    db.commit()
+    return {"mensaje": "Cita eliminada"}
+
+# ─── HISTORIAL DE PAGOS FONTANERO ─────────────────────────────────────────────
+
+@app.get("/fontaneros/{fontanero_id}/pagos")
+def historial_pagos(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    servicios = db.query(models.Servicio).filter(
+        models.Servicio.fontanero_id == fontanero.id,
+        models.Servicio.estado == "pagado",
+        models.Servicio.precio != None,
+    ).order_by(models.Servicio.creado_en.desc()).all()
+    resultado = []
+    for s in servicios:
+        cliente = db.query(models.Usuario).filter(models.Usuario.id == s.cliente_id).first()
+        comision = round(s.precio * 0.05, 2)
+        resultado.append({
+            "servicio_id": s.id,
+            "tipo": s.tipo,
+            "fecha": str(s.creado_en),
+            "precio_bruto": s.precio,
+            "comision_plataforma": comision,
+            "precio_neto": round(s.precio - comision, 2),
+            "metodo_pago": s.metodo_pago,
+            "cliente": cliente.nombre if cliente else "Cliente",
+        })
+    return resultado
+
+# ─── FACTURA PDF ──────────────────────────────────────────────────────────────
+
+@app.get("/servicios/{servicio_id}/factura")
+def descargar_factura(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    from fastapi.responses import Response
+    try:
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.pagesizes import A4
+        import io
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Generación de PDF no disponible. Instala reportlab.")
+
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    if servicio.estado not in ["pagado", "pago_pendiente"]:
+        raise HTTPException(status_code=400, detail="Solo se puede generar factura de servicios pagados")
+
+    cliente = db.query(models.Usuario).filter(models.Usuario.id == servicio.cliente_id).first()
+    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    w, h = A4
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(50, h - 60, "FonTap - Factura")
+    c.setFont("Helvetica", 12)
+    c.drawString(50, h - 100, f"Nº Factura: {servicio_id:05d}")
+    c.drawString(50, h - 120, f"Fecha: {servicio.creado_en.strftime('%d/%m/%Y') if servicio.creado_en else '-'}")
+    c.drawString(50, h - 160, f"Cliente: {cliente.nombre if cliente else '-'}")
+    c.drawString(50, h - 180, f"Email: {cliente.email if cliente else '-'}")
+    c.drawString(50, h - 220, f"Profesional: {fontanero_obj.nombre if fontanero_obj else '-'}")
+    c.drawString(50, h - 240, f"Zona: {fontanero_obj.zona if fontanero_obj else '-'}")
+    c.drawString(50, h - 280, f"Servicio: {servicio.tipo}")
+    c.drawString(50, h - 300, f"Descripción: {servicio.descripcion or '-'}")
+    c.drawString(50, h - 340, f"Importe total: {servicio.precio or 0:.2f} EUR")
+    c.drawString(50, h - 360, f"Método de pago: {servicio.metodo_pago or '-'}")
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(50, 50, "FonTap - Plataforma de servicios del hogar")
+    c.save()
+    buf.seek(0)
+    return Response(content=buf.read(), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=factura_{servicio_id}.pdf"})
+
+# ─── STRIPE ───────────────────────────────────────────────────────────────────
+
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
+
+@app.post("/servicios/{servicio_id}/stripe/crear-intent")
+def crear_stripe_intent(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=501, detail="Stripe no configurado. Añade STRIPE_SECRET_KEY en variables de entorno.")
+    try:
+        import stripe
+        stripe.api_key = STRIPE_SECRET_KEY
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Librería stripe no instalada.")
+
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio or not servicio.precio:
+        raise HTTPException(status_code=400, detail="Servicio no encontrado o sin precio")
+    intent = stripe.PaymentIntent.create(
+        amount=int(servicio.precio * 100),
+        currency="eur",
+        metadata={"servicio_id": servicio_id},
+    )
+    servicio.stripe_payment_intent = intent.id
+    db.commit()
+    return {"client_secret": intent.client_secret, "amount": servicio.precio}
+
+@app.post("/servicios/{servicio_id}/stripe/confirmar")
+def confirmar_stripe(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    servicio.estado = "pagado"
+    servicio.metodo_pago = "stripe"
+    comision = round((servicio.precio or 0) * 0.05, 2)
+    servicio.comision_aplicada = comision
+    if servicio.fontanero_id:
+        fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
+        if fontanero_obj and fontanero_obj.usuario_id:
+            _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido por Stripe", f"Pago de {servicio.precio}€ confirmado", "pago_recibido", servicio_id)
+    db.commit()
+    return {"mensaje": "Pago confirmado", "precio": servicio.precio, "comision": comision}
+
+# ─── BIZUM ────────────────────────────────────────────────────────────────────
+
+@app.get("/servicios/{servicio_id}/bizum/instrucciones")
+def instrucciones_bizum(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio or not servicio.precio:
+        raise HTTPException(status_code=400, detail="Servicio no encontrado o sin precio")
+    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
+    usuario_fontanero = db.query(models.Usuario).filter(models.Usuario.id == fontanero_obj.usuario_id).first() if fontanero_obj else None
+    return {
+        "importe": servicio.precio,
+        "concepto": f"FonTap servicio #{servicio_id}",
+        "telefono_destino": usuario_fontanero.telefono if usuario_fontanero else "Consultar con el profesional",
+        "instrucciones": [
+            f"1. Abre tu app bancaria y selecciona Bizum",
+            f"2. Envía {servicio.precio}€ al teléfono del profesional",
+            f"3. Añade el concepto: FonTap servicio #{servicio_id}",
+            f"4. Vuelve a la app y confirma el pago",
+        ],
+    }
+
+# ─── INMUEBLES (ADMIN FINCAS) ─────────────────────────────────────────────────
+
+@app.post("/inmuebles", response_model=schemas.InmuebleRespuesta)
+def crear_inmueble(
+    datos: schemas.InmuebleCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    inmueble = models.Inmueble(
+        administrador_id=current_user["id"],
+        nombre=datos.nombre,
+        direccion=datos.direccion,
+        ciudad=datos.ciudad,
+    )
+    db.add(inmueble)
+    db.commit()
+    db.refresh(inmueble)
+    return inmueble
+
+@app.get("/inmuebles", response_model=List[schemas.InmuebleRespuesta])
+def listar_inmuebles(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    return db.query(models.Inmueble).filter(
+        models.Inmueble.administrador_id == current_user["id"]
+    ).all()
+
+@app.delete("/inmuebles/{inmueble_id}")
+def eliminar_inmueble(
+    inmueble_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    inmueble = db.query(models.Inmueble).filter(
+        models.Inmueble.id == inmueble_id,
+        models.Inmueble.administrador_id == current_user["id"],
+    ).first()
+    if not inmueble:
+        raise HTTPException(status_code=404, detail="Inmueble no encontrado")
+    db.delete(inmueble)
+    db.commit()
+    return {"mensaje": "Inmueble eliminado"}
+
+# ─── VERIFICACIÓN DE IDENTIDAD ────────────────────────────────────────────────
+
+@app.post("/fontaneros/{fontanero_id}/documentos", response_model=schemas.DocumentoRespuesta)
+def subir_documento(
+    fontanero_id: int,
+    tipo: str,
+    archivo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    ext = archivo.filename.rsplit(".", 1)[-1] if "." in archivo.filename else "pdf"
+    nombre_archivo = f"doc_{uuid.uuid4().hex}.{ext}"
+    ruta = os.path.join(UPLOAD_DIR, nombre_archivo)
+    with open(ruta, "wb") as f:
+        f.write(archivo.file.read())
+    doc = models.DocumentoVerificacion(
+        fontanero_id=fontanero.id,
+        tipo=tipo,
+        url=f"/uploads/{nombre_archivo}",
+        estado="pendiente",
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+    return doc
+
+@app.get("/fontaneros/{fontanero_id}/documentos", response_model=List[schemas.DocumentoRespuesta])
+def ver_documentos(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    return db.query(models.DocumentoVerificacion).filter(
+        models.DocumentoVerificacion.fontanero_id == fontanero.id
+    ).all()
+
+# ─── PANEL DE ADMINISTRACIÓN ──────────────────────────────────────────────────
+
+def _verificar_admin(current_user: dict):
+    if current_user.get("tipo") not in ["admin"]:
+        raise HTTPException(status_code=403, detail="Acceso solo para administradores")
+
+@app.get("/admin/estadisticas", response_model=schemas.AdminStats)
+def admin_estadisticas(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _verificar_admin(current_user)
+    total_usuarios = db.query(models.Usuario).count()
+    total_fontaneros = db.query(models.Usuario).filter(models.Usuario.tipo == "fontanero").count()
+    total_clientes = db.query(models.Usuario).filter(models.Usuario.tipo == "cliente").count()
+    total_servicios = db.query(models.Servicio).count()
+    servicios_pendientes = db.query(models.Servicio).filter(models.Servicio.estado == "pendiente").count()
+    servicios_completados = db.query(models.Servicio).filter(models.Servicio.estado == "pagado").count()
+    pagados = db.query(models.Servicio).filter(
+        models.Servicio.estado == "pagado",
+        models.Servicio.precio != None,
+    ).all()
+    ingresos = sum(s.precio * 0.05 for s in pagados if s.precio)
+    return {
+        "total_usuarios": total_usuarios,
+        "total_fontaneros": total_fontaneros,
+        "total_clientes": total_clientes,
+        "total_servicios": total_servicios,
+        "servicios_pendientes": servicios_pendientes,
+        "servicios_completados": servicios_completados,
+        "ingresos_plataforma": round(ingresos, 2),
+    }
+
+@app.get("/admin/usuarios")
+def admin_listar_usuarios(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _verificar_admin(current_user)
+    return db.query(models.Usuario).order_by(models.Usuario.creado_en.desc()).all()
+
+@app.get("/admin/servicios")
+def admin_listar_servicios(
+    estado: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _verificar_admin(current_user)
+    q = db.query(models.Servicio)
+    if estado:
+        q = q.filter(models.Servicio.estado == estado)
+    return q.order_by(models.Servicio.creado_en.desc()).all()
+
+@app.put("/admin/fontaneros/{fontanero_id}/verificar")
+def admin_verificar_fontanero(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _verificar_admin(current_user)
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    fontanero.verificado = True
+    if fontanero.usuario_id:
+        _crear_notificacion(db, fontanero.usuario_id, "¡Perfil verificado!", "Tu perfil ha sido verificado por FonTap", "verificacion", fontanero_id)
+    db.commit()
+    return {"mensaje": "Fontanero verificado"}
+
+@app.put("/admin/documentos/{doc_id}/revisar")
+def admin_revisar_documento(
+    doc_id: int,
+    estado: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _verificar_admin(current_user)
+    if estado not in ["verificado", "rechazado"]:
+        raise HTTPException(status_code=400, detail="Estado debe ser verificado o rechazado")
+    doc = db.query(models.DocumentoVerificacion).filter(models.DocumentoVerificacion.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento no encontrado")
+    doc.estado = estado
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == doc.fontanero_id).first()
+    if fontanero and fontanero.usuario_id:
+        msg = "aprobado" if estado == "verificado" else "rechazado"
+        _crear_notificacion(db, fontanero.usuario_id, f"Documento {msg}", f"Tu documento '{doc.tipo}' ha sido {msg}", "documento", doc_id)
+    db.commit()
+    return {"mensaje": f"Documento {estado}"}

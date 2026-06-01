@@ -13,7 +13,7 @@ class Usuario(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     telefono = Column(String)
     password_hash = Column(String, nullable=False)
-    tipo = Column(String, default="cliente")
+    tipo = Column(String, default="cliente")  # cliente, fontanero, admin, administrador_fincas
     creado_en = Column(DateTime, default=utcnow)
 
 class Fontanero(Base):
@@ -31,6 +31,9 @@ class Fontanero(Base):
     especialidades = Column(Text, nullable=True)
     vacaciones_desde = Column(DateTime, nullable=True)
     vacaciones_hasta = Column(DateTime, nullable=True)
+    gremio = Column(String, default="fontanero")  # fontanero, electricista, pintor, cerrajero
+    verificado = Column(Boolean, default=False)
+    num_trabajos = Column(Integer, default=0)
 
 class Servicio(Base):
     __tablename__ = "servicios"
@@ -40,10 +43,14 @@ class Servicio(Base):
     tipo = Column(String)
     descripcion = Column(Text, nullable=True)
     urgente = Column(Boolean, default=False)
+    urgencia_ia = Column(String, nullable=True)  # baja, media, alta, critica
     estado = Column(String, default="pendiente")
     precio = Column(Float, nullable=True)
     metodo_pago = Column(String, nullable=True)
     fecha = Column(DateTime, nullable=True)
+    eta_minutos = Column(Integer, nullable=True)
+    comision_aplicada = Column(Float, nullable=True)
+    stripe_payment_intent = Column(String, nullable=True)
     creado_en = Column(DateTime, default=utcnow)
 
 class ServicioFontanero(Base):
@@ -115,4 +122,62 @@ class Notificacion(Base):
     tipo = Column(String, nullable=True)
     referencia_id = Column(Integer, nullable=True)
     leida = Column(Boolean, default=False)
+    creado_en = Column(DateTime, default=utcnow)
+
+class Favorito(Base):
+    __tablename__ = "favoritos"
+    id = Column(Integer, primary_key=True, index=True)
+    cliente_id = Column(Integer, ForeignKey("usuarios.id"))
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    creado_en = Column(DateTime, default=utcnow)
+
+class Oferta(Base):
+    __tablename__ = "ofertas"
+    id = Column(Integer, primary_key=True, index=True)
+    servicio_id = Column(Integer, ForeignKey("servicios.id"))
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    precio = Column(Float)
+    mensaje = Column(Text, nullable=True)
+    estado = Column(String, default="pendiente")  # pendiente, aceptada, rechazada
+    creado_en = Column(DateTime, default=utcnow)
+
+class Resena(Base):
+    __tablename__ = "resenas"
+    id = Column(Integer, primary_key=True, index=True)
+    servicio_id = Column(Integer, ForeignKey("servicios.id"), unique=True)
+    cliente_id = Column(Integer, ForeignKey("usuarios.id"))
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    puntualidad = Column(Float)
+    calidad = Column(Float)
+    precio_justo = Column(Float)
+    trato = Column(Float)
+    comentario = Column(Text, nullable=True)
+    creado_en = Column(DateTime, default=utcnow)
+
+class Cita(Base):
+    __tablename__ = "citas"
+    id = Column(Integer, primary_key=True, index=True)
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    servicio_id = Column(Integer, ForeignKey("servicios.id"), nullable=True)
+    titulo = Column(String)
+    fecha_inicio = Column(DateTime)
+    fecha_fin = Column(DateTime)
+    creado_en = Column(DateTime, default=utcnow)
+
+class Inmueble(Base):
+    __tablename__ = "inmuebles"
+    id = Column(Integer, primary_key=True, index=True)
+    administrador_id = Column(Integer, ForeignKey("usuarios.id"))
+    nombre = Column(String)
+    direccion = Column(String)
+    ciudad = Column(String, default="Bilbao")
+    creado_en = Column(DateTime, default=utcnow)
+
+class DocumentoVerificacion(Base):
+    __tablename__ = "documentos_verificacion"
+    id = Column(Integer, primary_key=True, index=True)
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    tipo = Column(String)  # dni, carnet_profesional, seguro
+    url = Column(String)
+    estado = Column(String, default="pendiente")  # pendiente, verificado, rechazado
     creado_en = Column(DateTime, default=utcnow)
