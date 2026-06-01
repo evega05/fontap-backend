@@ -1,10 +1,17 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from pydantic import BaseModel
 from . import models, schemas, auth
 from .database import engine, get_db
+import os, uuid, requests as _http
+
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+FCM_SERVER_KEY = os.getenv("FCM_SERVER_KEY", "")
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -17,6 +24,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 # ─── HELPERS ───────────────────────────────────────────────────────────────────
 
@@ -42,6 +51,32 @@ def get_or_create_fontanero(db: Session, usuario_id: int):
         db.refresh(fontanero)
         return fontanero
     return None
+
+def _crear_notificacion(db: Session, usuario_id: int, titulo: str, cuerpo: str, tipo: str = None, referencia_id: int = None):
+    notif = models.Notificacion(
+        usuario_id=usuario_id,
+        titulo=titulo,
+        cuerpo=cuerpo,
+        tipo=tipo,
+        referencia_id=referencia_id,
+    )
+    db.add(notif)
+    db.flush()
+    if FCM_SERVER_KEY:
+        tokens = db.query(models.TokenPush).filter(
+            models.TokenPush.usuario_id == usuario_id,
+            models.TokenPush.activo == True,
+        ).all()
+        for t in tokens:
+            try:
+                _http.post(
+                    "https://fcm.googleapis.com/fcm/send",
+                    json={"to": t.token, "notification": {"title": titulo, "body": cuerpo}},
+                    headers={"Authorization": f"key={FCM_SERVER_KEY}"},
+                    timeout=5,
+                )
+            except Exception:
+                pass
 
 # ─── AUTH ──────────────────────────────────────────────────────────────────────
 
@@ -216,6 +251,7 @@ def aceptar_servicio(
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
     servicio.fontanero_id = fontanero.id
     servicio.estado = "aceptado"
+    _crear_notificacion(db, servicio.cliente_id, "Servicio aceptado", f"Un fontanero ha aceptado tu solicitud de {servicio.tipo}", "servicio_aceptado", servicio.id)
     db.commit()
     return {"mensaje": "Servicio aceptado"}
 
@@ -229,6 +265,7 @@ def rechazar_servicio(
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
     servicio.estado = "rechazado"
+    _crear_notificacion(db, servicio.cliente_id, "Servicio rechazado", f"Tu solicitud de {servicio.tipo} no pudo ser atendida", "servicio_rechazado", servicio.id)
     db.commit()
     return {"mensaje": "Servicio rechazado"}
 
@@ -247,6 +284,7 @@ def enviar_precio(
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
     servicio.precio = datos.precio
     servicio.estado = "precio_enviado"
+    _crear_notificacion(db, servicio.cliente_id, "Precio recibido", f"El fontanero ha enviado un presupuesto de {datos.precio}€", "precio_enviado", servicio.id)
     db.commit()
     return {"mensaje": "Precio enviado al cliente", "precio": datos.precio}
 
@@ -265,8 +303,13 @@ def confirmar_pago(
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
     if not servicio.precio:
         raise HTTPException(status_code=400, detail="El fontanero aún no ha enviado el precio")
-    servicio.estado = "pago_pendiente" if datos.metodo == "efectivo" else "pagado"
+    nuevo_estado = "pago_pendiente" if datos.metodo == "efectivo" else "pagado"
+    servicio.estado = nuevo_estado
     servicio.metodo_pago = datos.metodo
+    if servicio.fontanero_id:
+        fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
+        if fontanero_obj and fontanero_obj.usuario_id:
+            _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido", f"El cliente ha confirmado el pago de {servicio.precio}€ via {datos.metodo}", "pago_recibido", servicio.id)
     db.commit()
     return {"mensaje": "Pago registrado", "precio": servicio.precio, "metodo": datos.metodo}
 
@@ -407,3 +450,162 @@ def eliminar_servicio(
     servicio.activo = False
     db.commit()
     return {"mensaje": "Servicio eliminado"}
+
+# ─── IMÁGENES DE SERVICIO ──────────────────────────────────────────────────────
+
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+
+@app.post("/servicios/{servicio_id}/imagenes", response_model=schemas.ImagenRespuesta)
+def subir_imagen_servicio(
+    servicio_id: int,
+    archivo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    if archivo.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
+    ext = archivo.filename.rsplit(".", 1)[-1] if "." in archivo.filename else "jpg"
+    nombre_archivo = f"{uuid.uuid4().hex}.{ext}"
+    ruta = os.path.join(UPLOAD_DIR, nombre_archivo)
+    with open(ruta, "wb") as f:
+        f.write(archivo.file.read())
+    imagen = models.ImagenServicio(servicio_id=servicio_id, url=f"/uploads/{nombre_archivo}")
+    db.add(imagen)
+    db.commit()
+    db.refresh(imagen)
+    return imagen
+
+@app.get("/servicios/{servicio_id}/imagenes", response_model=List[schemas.ImagenRespuesta])
+def listar_imagenes_servicio(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    return db.query(models.ImagenServicio).filter(
+        models.ImagenServicio.servicio_id == servicio_id
+    ).all()
+
+# ─── CHAT ──────────────────────────────────────────────────────────────────────
+
+@app.post("/servicios/{servicio_id}/mensajes", response_model=schemas.MensajeRespuesta)
+def enviar_mensaje(
+    servicio_id: int,
+    datos: schemas.MensajeCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    emisor_id = current_user["id"]
+    mensaje = models.Mensaje(servicio_id=servicio_id, emisor_id=emisor_id, texto=datos.texto)
+    db.add(mensaje)
+    # notificar al otro participante
+    if emisor_id == servicio.cliente_id and servicio.fontanero_id:
+        fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
+        if fontanero_obj and fontanero_obj.usuario_id:
+            _crear_notificacion(db, fontanero_obj.usuario_id, "Nuevo mensaje", datos.texto[:80], "mensaje", servicio_id)
+    else:
+        _crear_notificacion(db, servicio.cliente_id, "Nuevo mensaje", datos.texto[:80], "mensaje", servicio_id)
+    db.commit()
+    db.refresh(mensaje)
+    return mensaje
+
+@app.get("/servicios/{servicio_id}/mensajes", response_model=List[schemas.MensajeRespuesta])
+def listar_mensajes(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    return db.query(models.Mensaje).filter(
+        models.Mensaje.servicio_id == servicio_id
+    ).order_by(models.Mensaje.creado_en).all()
+
+@app.put("/servicios/{servicio_id}/mensajes/leer")
+def marcar_mensajes_leidos(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    db.query(models.Mensaje).filter(
+        models.Mensaje.servicio_id == servicio_id,
+        models.Mensaje.emisor_id != current_user["id"],
+        models.Mensaje.leido == False,
+    ).update({"leido": True})
+    db.commit()
+    return {"mensaje": "Mensajes marcados como leídos"}
+
+# ─── NOTIFICACIONES PUSH ───────────────────────────────────────────────────────
+
+@app.post("/usuarios/{usuario_id}/push-token")
+def registrar_push_token(
+    usuario_id: int,
+    datos: schemas.TokenPushCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    existente = db.query(models.TokenPush).filter(models.TokenPush.token == datos.token).first()
+    if existente:
+        existente.usuario_id = usuario_id
+        existente.activo = True
+        existente.plataforma = datos.plataforma
+    else:
+        db.add(models.TokenPush(usuario_id=usuario_id, token=datos.token, plataforma=datos.plataforma))
+    db.commit()
+    return {"mensaje": "Token registrado"}
+
+@app.delete("/usuarios/{usuario_id}/push-token")
+def eliminar_push_token(
+    usuario_id: int,
+    datos: schemas.TokenPushCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    db.query(models.TokenPush).filter(
+        models.TokenPush.usuario_id == usuario_id,
+        models.TokenPush.token == datos.token,
+    ).update({"activo": False})
+    db.commit()
+    return {"mensaje": "Token eliminado"}
+
+@app.get("/usuarios/{usuario_id}/notificaciones", response_model=List[schemas.NotificacionRespuesta])
+def listar_notificaciones(
+    usuario_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    return db.query(models.Notificacion).filter(
+        models.Notificacion.usuario_id == usuario_id
+    ).order_by(models.Notificacion.creado_en.desc()).limit(50).all()
+
+@app.put("/notificaciones/{notif_id}/leer")
+def marcar_notificacion_leida(
+    notif_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    notif = db.query(models.Notificacion).filter(
+        models.Notificacion.id == notif_id,
+        models.Notificacion.usuario_id == current_user["id"],
+    ).first()
+    if not notif:
+        raise HTTPException(status_code=404, detail="Notificación no encontrada")
+    notif.leida = True
+    db.commit()
+    return {"mensaje": "Notificación marcada como leída"}
+
+@app.put("/usuarios/{usuario_id}/notificaciones/leer-todas")
+def marcar_todas_leidas(
+    usuario_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    db.query(models.Notificacion).filter(
+        models.Notificacion.usuario_id == usuario_id,
+        models.Notificacion.leida == False,
+    ).update({"leida": True})
+    db.commit()
+    return {"mensaje": "Todas las notificaciones marcadas como leídas"}

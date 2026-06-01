@@ -68,3 +68,39 @@ class BloqueoHorario(Base):
     hora_inicio = Column(String)
     hora_fin = Column(String)
     motivo = Column(String, nullable=True)
+
+class ImagenServicio(Base):
+    __tablename__ = "imagenes_servicio"
+    id = Column(Integer, primary_key=True, index=True)
+    servicio_id = Column(Integer, ForeignKey("servicios.id"))
+    url = Column(String)
+    creado_en = Column(DateTime, default=utcnow)
+
+class Mensaje(Base):
+    __tablename__ = "mensajes"
+    id = Column(Integer, primary_key=True, index=True)
+    servicio_id = Column(Integer, ForeignKey("servicios.id"))
+    emisor_id = Column(Integer, ForeignKey("usuarios.id"))
+    texto = Column(Text)
+    leido = Column(Boolean, default=False)
+    creado_en = Column(DateTime, default=utcnow)
+
+class TokenPush(Base):
+    __tablename__ = "tokens_push"
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    token = Column(String, unique=True)
+    plataforma = Column(String, default="android")
+    activo = Column(Boolean, default=True)
+    creado_en = Column(DateTime, default=utcnow)
+
+class Notificacion(Base):
+    __tablename__ = "notificaciones"
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    titulo = Column(String)
+    cuerpo = Column(String)
+    tipo = Column(String, nullable=True)
+    referencia_id = Column(Integer, nullable=True)
+    leida = Column(Boolean, default=False)
+    creado_en = Column(DateTime, default=utcnow)
