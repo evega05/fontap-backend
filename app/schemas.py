@@ -84,6 +84,16 @@ class ServicioCrear(BaseModel):
     fecha: Optional[datetime.datetime] = None
     fontanero_id: Optional[int] = None
 
+ESTADO_COLORES = {
+    "pendiente": "#D97706",
+    "aceptado": "#0A7A3E",
+    "rechazado": "#C8271A",
+    "pagado": "#0A7A3E",
+    "precio_enviado": "#1A56DB",
+    "completado": "#0A7A3E",
+    "cancelado": "#C8271A",
+}
+
 class ServicioRespuesta(BaseModel):
     id: int
     cliente_id: int
@@ -93,9 +103,17 @@ class ServicioRespuesta(BaseModel):
     urgente: bool
     urgencia_ia: Optional[str] = None
     estado: str
+    estado_color: Optional[str] = None
     precio: Optional[float] = None
     fecha: Optional[datetime.datetime] = None
     eta_minutos: Optional[int] = None
+
+    @classmethod
+    def from_orm_with_color(cls, obj):
+        data = cls.model_validate(obj)
+        data.estado_color = ESTADO_COLORES.get(obj.estado, "#D97706")
+        return data
+
     class Config:
         from_attributes = True
 

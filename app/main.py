@@ -215,6 +215,7 @@ def ver_solicitudes_fontanero(
             "descripcion": s.descripcion,
             "urgente": s.urgente,
             "estado": s.estado,
+            "estado_color": schemas.ESTADO_COLORES.get(s.estado, "#D97706"),
             "precio": s.precio,
             "fecha": str(s.fecha) if s.fecha else None,
             "cliente_nombre": cliente.nombre if cliente else "Cliente",
@@ -251,7 +252,7 @@ def crear_servicio(
         for f in fontaneros_zona:
             _crear_notificacion(db, f.usuario_id, "Nueva solicitud urgente", f"Solicitud urgente de {servicio.tipo} cerca de tu zona", "solicitud_urgente", nuevo.id)
         db.commit()
-    return nuevo
+    return schemas.ServicioRespuesta.from_orm_with_color(nuevo)
 
 @app.get("/servicios/{servicio_id}")
 def ver_servicio(
@@ -262,15 +263,7 @@ def ver_servicio(
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
-    return {
-        "id": servicio.id,
-        "tipo": servicio.tipo,
-        "descripcion": servicio.descripcion,
-        "urgente": servicio.urgente,
-        "estado": servicio.estado,
-        "precio": servicio.precio,
-        "fecha": str(servicio.fecha) if servicio.fecha else None,
-    }
+    return schemas.ServicioRespuesta.from_orm_with_color(servicio)
 
 @app.put("/servicios/{servicio_id}/aceptar")
 def aceptar_servicio(
@@ -370,9 +363,10 @@ def ver_servicios_cliente(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    return db.query(models.Servicio).filter(
+    servicios = db.query(models.Servicio).filter(
         models.Servicio.cliente_id == cliente_id
     ).order_by(models.Servicio.id.desc()).all()
+    return [schemas.ServicioRespuesta.from_orm_with_color(s) for s in servicios]
 
 # ─── HORARIOS / BLOQUEOS / SERVICIOS FONTANERO ────────────────────────────────
 
