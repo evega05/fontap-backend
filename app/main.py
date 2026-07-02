@@ -2,6 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from typing import List, Optional
 from pydantic import BaseModel
 from . import models, schemas, auth
@@ -198,12 +199,15 @@ def ver_solicitudes_fontanero(
 
     pendientes = db.query(models.Servicio).filter(
         models.Servicio.estado == "pendiente",
-        models.Servicio.fontanero_id == None,
+        or_(
+            models.Servicio.fontanero_id == None,
+            models.Servicio.fontanero_id == fontanero.id,
+        ),
     ).all()
 
     propias = db.query(models.Servicio).filter(
         models.Servicio.fontanero_id == fontanero.id,
-        models.Servicio.estado.in_(["aceptado", "completado", "pagado"]),
+        models.Servicio.estado.in_(["aceptado", "precio_enviado", "pago_pendiente", "pagado", "completado"]),
     ).all()
 
     resultado = []
@@ -234,6 +238,7 @@ def crear_servicio(
     cliente_id = current_user["id"]
     nuevo = models.Servicio(
         cliente_id=cliente_id,
+        fontanero_id=servicio.fontanero_id,
         tipo=servicio.tipo,
         descripcion=servicio.descripcion,
         urgente=servicio.urgente,
@@ -244,7 +249,14 @@ def crear_servicio(
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
-    if servicio.urgente:
+    if servicio.fontanero_id:
+        fontanero_directo = db.query(models.Fontanero).filter(
+            models.Fontanero.id == servicio.fontanero_id
+        ).first()
+        if fontanero_directo:
+            _crear_notificacion(db, fontanero_directo.usuario_id, "Nueva solicitud", f"Tienes una nueva solicitud de {servicio.tipo}", "solicitud_directa", nuevo.id)
+            db.commit()
+    elif servicio.urgente:
         fontaneros_zona = db.query(models.Fontanero).filter(
             models.Fontanero.disponible == True,
             models.Fontanero.usuario_id != None,
