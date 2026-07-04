@@ -107,6 +107,8 @@ class ServicioRespuesta(BaseModel):
     precio: Optional[float] = None
     fecha: Optional[datetime.datetime] = None
     eta_minutos: Optional[int] = None
+    fontanero_nombre: Optional[str] = None
+    num_ofertas: int = 0
 
     @classmethod
     def from_orm_with_color(cls, obj):
@@ -224,6 +226,12 @@ class OfertaRespuesta(BaseModel):
     mensaje: Optional[str] = None
     estado: str
     creado_en: datetime.datetime
+    fontanero_nombre: Optional[str] = None
+    fontanero_valoracion: Optional[float] = None
+    fontanero_zona: Optional[str] = None
+    fontanero_trabajos: Optional[int] = None
+    tipo: Optional[str] = None
+    zona: Optional[str] = None
     class Config:
         from_attributes = True
 
