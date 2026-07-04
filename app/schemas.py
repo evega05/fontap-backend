@@ -15,7 +15,7 @@ class UsuarioRegistro(BaseModel):
     email: EmailStr
     telefono: str
     password: str
-    tipo: Literal["cliente", "fontanero", "admin", "administrador_fincas"] = "cliente"
+    tipo: Literal["cliente", "fontanero", "administrador_fincas"] = "cliente"
 
 class UsuarioLogin(BaseModel):
     email: EmailStr

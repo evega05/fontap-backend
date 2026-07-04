@@ -292,6 +292,8 @@ def aceptar_servicio(
     ).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    if servicio.fontanero_id is not None and servicio.fontanero_id != fontanero.id:
+        raise HTTPException(status_code=400, detail="Este servicio ya fue asignado a otro profesional")
     servicio.fontanero_id = fontanero.id
     servicio.estado = "aceptado"
     _crear_notificacion(db, servicio.cliente_id, "Servicio aceptado", f"Un fontanero ha aceptado tu solicitud de {servicio.tipo}", "servicio_aceptado", servicio.id)
@@ -307,6 +309,11 @@ def rechazar_servicio(
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == current_user["id"]
+    ).first()
+    if not fontanero or servicio.fontanero_id not in (None, fontanero.id):
+        raise HTTPException(status_code=403, detail="No puedes rechazar un servicio que no es tuyo")
     servicio.estado = "rechazado"
     _crear_notificacion(db, servicio.cliente_id, "Servicio rechazado", f"Tu solicitud de {servicio.tipo} no pudo ser atendida", "servicio_rechazado", servicio.id)
     db.commit()
@@ -325,6 +332,11 @@ def enviar_precio(
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == current_user["id"]
+    ).first()
+    if not fontanero or servicio.fontanero_id != fontanero.id:
+        raise HTTPException(status_code=403, detail="No puedes enviar precio para un servicio que no es tuyo")
     servicio.precio = datos.precio
     servicio.estado = "precio_enviado"
     _crear_notificacion(db, servicio.cliente_id, "Precio recibido", f"El fontanero ha enviado un presupuesto de {datos.precio}€", "precio_enviado", servicio.id)
@@ -344,6 +356,8 @@ def confirmar_pago(
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    if servicio.cliente_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Solo el cliente puede confirmar el pago de este servicio")
     if not servicio.precio:
         raise HTTPException(status_code=400, detail="El fontanero aún no ha enviado el precio")
     nuevo_estado = "pago_pendiente" if datos.metodo == "efectivo" else "pagado"
@@ -382,6 +396,14 @@ def ver_servicios_cliente(
 
 # ─── HORARIOS / BLOQUEOS / SERVICIOS FONTANERO ────────────────────────────────
 
+def _resolver_fontanero(db: Session, fontanero_id: int) -> models.Fontanero:
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    return fontanero
+
 @app.post("/fontaneros/{fontanero_id}/horario", response_model=schemas.HorarioBaseRespuesta)
 def crear_horario(
     fontanero_id: int,
@@ -389,8 +411,9 @@ def crear_horario(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    fontanero = _resolver_fontanero(db, fontanero_id)
     nuevo = models.HorarioBase(
-        fontanero_id=fontanero_id,
+        fontanero_id=fontanero.id,
         dia_semana=horario.dia_semana,
         hora_inicio=horario.hora_inicio,
         hora_fin=horario.hora_fin,
@@ -403,8 +426,9 @@ def crear_horario(
 
 @app.get("/fontaneros/{fontanero_id}/horario", response_model=List[schemas.HorarioBaseRespuesta])
 def ver_horario(fontanero_id: int, db: Session = Depends(get_db)):
+    fontanero = _resolver_fontanero(db, fontanero_id)
     return db.query(models.HorarioBase).filter(
-        models.HorarioBase.fontanero_id == fontanero_id
+        models.HorarioBase.fontanero_id == fontanero.id
     ).all()
 
 @app.post("/fontaneros/{fontanero_id}/bloqueos", response_model=schemas.BloqueoRespuesta)
@@ -414,8 +438,9 @@ def crear_bloqueo(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    fontanero = _resolver_fontanero(db, fontanero_id)
     nuevo = models.BloqueoHorario(
-        fontanero_id=fontanero_id,
+        fontanero_id=fontanero.id,
         fecha=bloqueo.fecha,
         hora_inicio=bloqueo.hora_inicio,
         hora_fin=bloqueo.hora_fin,
@@ -432,8 +457,9 @@ def ver_bloqueos(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    fontanero = _resolver_fontanero(db, fontanero_id)
     return db.query(models.BloqueoHorario).filter(
-        models.BloqueoHorario.fontanero_id == fontanero_id
+        models.BloqueoHorario.fontanero_id == fontanero.id
     ).all()
 
 @app.delete("/fontaneros/{fontanero_id}/bloqueos/{bloqueo_id}")
@@ -443,9 +469,10 @@ def eliminar_bloqueo(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    fontanero = _resolver_fontanero(db, fontanero_id)
     bloqueo = db.query(models.BloqueoHorario).filter(
         models.BloqueoHorario.id == bloqueo_id,
-        models.BloqueoHorario.fontanero_id == fontanero_id,
+        models.BloqueoHorario.fontanero_id == fontanero.id,
     ).first()
     if not bloqueo:
         raise HTTPException(status_code=404, detail="Bloqueo no encontrado")
@@ -460,8 +487,9 @@ def añadir_servicio(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    fontanero = _resolver_fontanero(db, fontanero_id)
     nuevo = models.ServicioFontanero(
-        fontanero_id=fontanero_id,
+        fontanero_id=fontanero.id,
         nombre=servicio.nombre,
         precio=servicio.precio,
         duracion_minutos=servicio.duracion_minutos,
@@ -473,8 +501,9 @@ def añadir_servicio(
 
 @app.get("/fontaneros/{fontanero_id}/servicios", response_model=List[schemas.ServicioFontaneroRespuesta])
 def ver_servicios_fontanero(fontanero_id: int, db: Session = Depends(get_db)):
+    fontanero = _resolver_fontanero(db, fontanero_id)
     return db.query(models.ServicioFontanero).filter(
-        models.ServicioFontanero.fontanero_id == fontanero_id,
+        models.ServicioFontanero.fontanero_id == fontanero.id,
         models.ServicioFontanero.activo == True,
     ).all()
 
@@ -485,9 +514,10 @@ def eliminar_servicio(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    fontanero = _resolver_fontanero(db, fontanero_id)
     servicio = db.query(models.ServicioFontanero).filter(
         models.ServicioFontanero.id == servicio_id,
-        models.ServicioFontanero.fontanero_id == fontanero_id,
+        models.ServicioFontanero.fontanero_id == fontanero.id,
     ).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
@@ -533,40 +563,6 @@ def listar_imagenes_servicio(
     ).all()
 
 # ─── CHAT ──────────────────────────────────────────────────────────────────────
-
-@app.post("/servicios/{servicio_id}/mensajes", response_model=schemas.MensajeRespuesta)
-def enviar_mensaje(
-    servicio_id: int,
-    datos: schemas.MensajeCrear,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(auth.get_current_user),
-):
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio:
-        raise HTTPException(status_code=404, detail="Servicio no encontrado")
-    emisor_id = current_user["id"]
-    mensaje = models.Mensaje(servicio_id=servicio_id, emisor_id=emisor_id, texto=datos.texto)
-    db.add(mensaje)
-    # notificar al otro participante
-    if emisor_id == servicio.cliente_id and servicio.fontanero_id:
-        fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
-        if fontanero_obj and fontanero_obj.usuario_id:
-            _crear_notificacion(db, fontanero_obj.usuario_id, "Nuevo mensaje", datos.texto[:80], "mensaje", servicio_id)
-    else:
-        _crear_notificacion(db, servicio.cliente_id, "Nuevo mensaje", datos.texto[:80], "mensaje", servicio_id)
-    db.commit()
-    db.refresh(mensaje)
-    return mensaje
-
-@app.get("/servicios/{servicio_id}/mensajes", response_model=List[schemas.MensajeRespuesta])
-def listar_mensajes(
-    servicio_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(auth.get_current_user),
-):
-    return db.query(models.Mensaje).filter(
-        models.Mensaje.servicio_id == servicio_id
-    ).order_by(models.Mensaje.creado_en).all()
 
 @app.put("/servicios/{servicio_id}/mensajes/leer")
 def marcar_mensajes_leidos(
@@ -888,6 +884,11 @@ def actualizar_eta(
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == current_user["id"]
+    ).first()
+    if not fontanero or servicio.fontanero_id != fontanero.id:
+        raise HTTPException(status_code=403, detail="No puedes actualizar el ETA de un servicio que no es tuyo")
     servicio.eta_minutos = datos.eta_minutos
     _crear_notificacion(db, servicio.cliente_id, "Fontanero en camino", f"Llegará en aproximadamente {datos.eta_minutos} minutos", "eta", servicio_id)
     db.commit()
@@ -1027,6 +1028,10 @@ def aceptar_oferta(
     if not oferta:
         raise HTTPException(status_code=404, detail="Oferta no encontrada")
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    if servicio.cliente_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Solo el cliente puede aceptar ofertas de este servicio")
     servicio.fontanero_id = oferta.fontanero_id
     servicio.precio = oferta.precio
     servicio.estado = "aceptado"
@@ -1423,7 +1428,7 @@ def admin_estadisticas(
         "ingresos_plataforma": round(ingresos, 2),
     }
 
-@app.get("/admin/usuarios")
+@app.get("/admin/usuarios", response_model=List[schemas.UsuarioRespuesta])
 def admin_listar_usuarios(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
@@ -1484,42 +1489,62 @@ def admin_revisar_documento(
 
 class MensajeCrear(BaseModel):
     contenido: str
-    remitente_tipo: str
 
 @app.post("/servicios/{servicio_id}/mensajes")
-def enviar_mensaje(servicio_id: int, mensaje: MensajeCrear, db: Session = Depends(get_db)):
+def enviar_mensaje(
+    servicio_id: int,
+    mensaje: MensajeCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    emisor_id = current_user["id"]
+    emisor = db.query(models.Usuario).filter(models.Usuario.id == emisor_id).first()
     nuevo = models.Mensaje(
         servicio_id=servicio_id,
-        emisor_id=1,
+        emisor_id=emisor_id,
         texto=mensaje.contenido,
         leido=False,
     )
     db.add(nuevo)
+    if emisor_id == servicio.cliente_id and servicio.fontanero_id:
+        fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
+        if fontanero_obj and fontanero_obj.usuario_id:
+            _crear_notificacion(db, fontanero_obj.usuario_id, "Nuevo mensaje", mensaje.contenido[:80], "mensaje", servicio_id)
+    elif servicio.cliente_id != emisor_id:
+        _crear_notificacion(db, servicio.cliente_id, "Nuevo mensaje", mensaje.contenido[:80], "mensaje", servicio_id)
     db.commit()
     db.refresh(nuevo)
     return {
         "id": nuevo.id,
         "contenido": nuevo.texto,
-        "remitente_tipo": mensaje.remitente_tipo,
-        "remitente_nombre": "Usuario",
+        "remitente_tipo": emisor.tipo if emisor else "cliente",
+        "remitente_nombre": emisor.nombre if emisor else "Usuario",
         "creado_en": str(nuevo.creado_en),
     }
 
 @app.get("/servicios/{servicio_id}/mensajes")
-def ver_mensajes(servicio_id: int, db: Session = Depends(get_db)):
+def ver_mensajes(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
     mensajes = db.query(models.Mensaje).filter(
         models.Mensaje.servicio_id == servicio_id
     ).order_by(models.Mensaje.creado_en).all()
-    return [
-        {
+    resultado = []
+    for m in mensajes:
+        emisor = db.query(models.Usuario).filter(models.Usuario.id == m.emisor_id).first()
+        resultado.append({
             "id": m.id,
             "contenido": m.texto,
-            "remitente_tipo": "cliente",
-            "remitente_nombre": "Usuario",
+            "remitente_tipo": emisor.tipo if emisor else "cliente",
+            "remitente_nombre": emisor.nombre if emisor else "Usuario",
             "creado_en": str(m.creado_en),
-        }
-        for m in mensajes
-    ]
+        })
+    return resultado
 # ─── CHAT GENERAL ─────────────────────────────────────────────────────────────
 
 class MensajeChatCrear(BaseModel):
@@ -1527,12 +1552,21 @@ class MensajeChatCrear(BaseModel):
     remitente_tipo: str
     remitente_nombre: Optional[str] = None
 
+def _escapar_like(valor: str) -> str:
+    return valor.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
 @app.post("/chat/{chat_id}/mensajes")
-def enviar_mensaje_chat(chat_id: str, mensaje: MensajeChatCrear, db: Session = Depends(get_db)):
+def enviar_mensaje_chat(
+    chat_id: str,
+    mensaje: MensajeChatCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    nombre = mensaje.remitente_nombre or "Usuario"
     nuevo = models.Mensaje(
         servicio_id=0,
-        emisor_id=1,
-        texto=f"{chat_id}||{mensaje.remitente_tipo}||{mensaje.remitente_nombre}||{mensaje.contenido}",
+        emisor_id=current_user["id"],
+        texto=f"{chat_id}||{mensaje.remitente_tipo}||{nombre}||{mensaje.contenido}",
         leido=False,
     )
     db.add(nuevo)
@@ -1542,14 +1576,18 @@ def enviar_mensaje_chat(chat_id: str, mensaje: MensajeChatCrear, db: Session = D
         "id": nuevo.id,
         "contenido": mensaje.contenido,
         "remitente_tipo": mensaje.remitente_tipo,
-        "remitente_nombre": mensaje.remitente_nombre,
+        "remitente_nombre": nombre,
         "creado_en": str(nuevo.creado_en),
     }
 
 @app.get("/chat/{chat_id}/mensajes")
-def ver_mensajes_chat(chat_id: str, db: Session = Depends(get_db)):
+def ver_mensajes_chat(
+    chat_id: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
     mensajes = db.query(models.Mensaje).filter(
-        models.Mensaje.texto.like(f"{chat_id}||%")
+        models.Mensaje.texto.like(f"{_escapar_like(chat_id)}||%", escape="\\")
     ).order_by(models.Mensaje.creado_en).all()
     resultado = []
     for m in mensajes:
