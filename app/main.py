@@ -266,6 +266,17 @@ def crear_servicio(
         db.commit()
     return schemas.ServicioRespuesta.from_orm_with_color(nuevo)
 
+@app.get("/servicios/abiertos", response_model=List[schemas.ServicioRespuesta])
+def listar_servicios_abiertos(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    servicios = db.query(models.Servicio).filter(
+        models.Servicio.estado == "pendiente",
+        models.Servicio.fontanero_id == None,
+    ).order_by(models.Servicio.id.desc()).all()
+    return [schemas.ServicioRespuesta.from_orm_with_color(s) for s in servicios]
+
 @app.get("/servicios/{servicio_id}")
 def ver_servicio(
     servicio_id: int,
@@ -392,7 +403,19 @@ def ver_servicios_cliente(
     servicios = db.query(models.Servicio).filter(
         models.Servicio.cliente_id == cliente_id
     ).order_by(models.Servicio.id.desc()).all()
-    return [schemas.ServicioRespuesta.from_orm_with_color(s) for s in servicios]
+    resultado = []
+    for s in servicios:
+        data = schemas.ServicioRespuesta.from_orm_with_color(s)
+        if s.fontanero_id:
+            fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == s.fontanero_id).first()
+            data.fontanero_nombre = fontanero.nombre if fontanero else None
+        if s.estado == "pendiente":
+            data.num_ofertas = db.query(models.Oferta).filter(
+                models.Oferta.servicio_id == s.id,
+                models.Oferta.estado == "pendiente",
+            ).count()
+        resultado.append(data)
+    return resultado
 
 # ─── HORARIOS / BLOQUEOS / SERVICIOS FONTANERO ────────────────────────────────
 
@@ -971,6 +994,22 @@ def listar_favoritos(
 
 # ─── SISTEMA DE LICITACIÓN (OFERTAS) ──────────────────────────────────────────
 
+def _enriquecer_oferta(db: Session, oferta: models.Oferta, incluir_fontanero: bool = False, incluir_servicio: bool = False) -> schemas.OfertaRespuesta:
+    data = schemas.OfertaRespuesta.model_validate(oferta)
+    if incluir_fontanero:
+        fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == oferta.fontanero_id).first()
+        if fontanero:
+            data.fontanero_nombre = fontanero.nombre
+            data.fontanero_valoracion = fontanero.valoracion
+            data.fontanero_zona = fontanero.zona
+            data.fontanero_trabajos = fontanero.num_trabajos
+    if incluir_servicio:
+        servicio = db.query(models.Servicio).filter(models.Servicio.id == oferta.servicio_id).first()
+        if servicio:
+            data.tipo = servicio.tipo
+            data.zona = "Bilbao"
+    return data
+
 @app.post("/servicios/{servicio_id}/ofertas", response_model=schemas.OfertaRespuesta)
 def crear_oferta(
     servicio_id: int,
@@ -1009,10 +1048,23 @@ def listar_ofertas(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    return db.query(models.Oferta).filter(
+    ofertas = db.query(models.Oferta).filter(
         models.Oferta.servicio_id == servicio_id,
         models.Oferta.estado == "pendiente",
     ).order_by(models.Oferta.precio).all()
+    return [_enriquecer_oferta(db, o, incluir_fontanero=True) for o in ofertas]
+
+@app.get("/fontaneros/{fontanero_id}/ofertas", response_model=List[schemas.OfertaRespuesta])
+def listar_mis_ofertas(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = _resolver_fontanero(db, fontanero_id)
+    ofertas = db.query(models.Oferta).filter(
+        models.Oferta.fontanero_id == fontanero.id
+    ).order_by(models.Oferta.id.desc()).all()
+    return [_enriquecer_oferta(db, o, incluir_servicio=True) for o in ofertas]
 
 @app.put("/servicios/{servicio_id}/ofertas/{oferta_id}/aceptar")
 def aceptar_oferta(
@@ -1045,6 +1097,28 @@ def aceptar_oferta(
         _crear_notificacion(db, fontanero.usuario_id, "¡Tu oferta fue aceptada!", f"El cliente aceptó tu oferta de {oferta.precio}€", "oferta_aceptada", servicio_id)
     db.commit()
     return {"mensaje": "Oferta aceptada"}
+
+@app.put("/servicios/{servicio_id}/ofertas/{oferta_id}/rechazar")
+def rechazar_oferta(
+    servicio_id: int,
+    oferta_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    oferta = db.query(models.Oferta).filter(
+        models.Oferta.id == oferta_id,
+        models.Oferta.servicio_id == servicio_id,
+    ).first()
+    if not oferta:
+        raise HTTPException(status_code=404, detail="Oferta no encontrada")
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    if servicio.cliente_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Solo el cliente puede rechazar ofertas de este servicio")
+    oferta.estado = "rechazada"
+    db.commit()
+    return {"mensaje": "Oferta rechazada"}
 
 # ─── VALORACIÓN DETALLADA ─────────────────────────────────────────────────────
 
