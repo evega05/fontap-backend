@@ -25,7 +25,7 @@ class Fontanero(Base):
     zona = Column(String, default="Bilbao")
     disponible = Column(Boolean, default=True)
     disponible_24h = Column(Boolean, default=False)
-    valoracion = Column(Float, default=5.0)
+    valoracion = Column(Float, nullable=True)
     foto_url = Column(String, nullable=True)
     descripcion = Column(Text, nullable=True)
     especialidades = Column(Text, nullable=True)
