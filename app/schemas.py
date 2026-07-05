@@ -75,7 +75,7 @@ class GaleriaRespuesta(BaseModel):
 class EstadisticasRespuesta(BaseModel):
     trabajos_completados: int
     ingresos_totales: float
-    valoracion_media: float
+    valoracion_media: Optional[float] = None
     tasa_aceptacion: float
 
 class ServicioCrear(BaseModel):

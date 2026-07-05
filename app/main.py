@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, nullslast
 from typing import List, Optional
 from pydantic import BaseModel
 from . import models, schemas, auth
@@ -15,6 +15,24 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 FCM_SERVER_KEY = os.getenv("FCM_SERVER_KEY", "")
 
 models.Base.metadata.create_all(bind=engine)
+
+def _limpiar_valoraciones_ficticias():
+    """Corrige fontaneros que aún tienen el 5.0 de relleno de antes de tener reseñas reales."""
+    from .database import SessionLocal
+    db = SessionLocal()
+    try:
+        sin_resenas = db.query(models.Fontanero).filter(
+            models.Fontanero.valoracion == 5.0,
+            ~models.Fontanero.id.in_(db.query(models.Resena.fontanero_id).distinct()),
+        ).all()
+        for f in sin_resenas:
+            f.valoracion = None
+        if sin_resenas:
+            db.commit()
+    finally:
+        db.close()
+
+_limpiar_valoraciones_ficticias()
 
 app = FastAPI(title="FonTap API")
 
@@ -44,7 +62,6 @@ def get_or_create_fontanero(db: Session, usuario_id: int):
             telefono=usuario_obj.telefono,
             disponible=True,
             disponible_24h=False,
-            valoracion=5.0,
             zona="Bilbao",
         )
         db.add(fontanero)
@@ -918,7 +935,7 @@ def ver_estadisticas(
     return {
         "trabajos_completados": trabajos_completados,
         "ingresos_totales": round(ingresos_totales, 2),
-        "valoracion_media": fontanero.valoracion or 5.0,
+        "valoracion_media": fontanero.valoracion,
         "tasa_aceptacion": tasa_aceptacion,
     }
 
@@ -941,7 +958,7 @@ def buscar_fontaneros(
         q = q.filter(models.Fontanero.disponible_24h == disponible_24h)
     if verificado is not None:
         q = q.filter(models.Fontanero.verificado == verificado)
-    return q.order_by(models.Fontanero.valoracion.desc()).all()
+    return q.order_by(nullslast(models.Fontanero.valoracion.desc())).all()
 
 # ─── ETA ───────────────────────────────────────────────────────────────────────
 
