@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, nullslast
+from sqlalchemy import or_, nullslast, inspect, text
 from typing import List, Optional
 from pydantic import BaseModel
 from . import models, schemas, auth
@@ -15,6 +15,27 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 FCM_SERVER_KEY = os.getenv("FCM_SERVER_KEY", "")
 
 models.Base.metadata.create_all(bind=engine)
+
+def _migrar_columnas_faltantes():
+    """create_all() no altera tablas ya existentes: agrega columnas nuevas del modelo
+    que todavía no existan en la base de datos real (necesario tras cada cambio de esquema)."""
+    inspector = inspect(engine)
+    if "fontaneros" not in inspector.get_table_names():
+        return
+    existentes = {c["name"] for c in inspector.get_columns("fontaneros")}
+    columnas_nuevas = {
+        "latitud": "FLOAT",
+        "longitud": "FLOAT",
+        "ubicacion_actualizada": "TIMESTAMP",
+    }
+    faltantes = {nombre: tipo for nombre, tipo in columnas_nuevas.items() if nombre not in existentes}
+    if not faltantes:
+        return
+    with engine.begin() as conn:
+        for nombre, tipo in faltantes.items():
+            conn.execute(text(f"ALTER TABLE fontaneros ADD COLUMN {nombre} {tipo}"))
+
+_migrar_columnas_faltantes()
 
 def _limpiar_valoraciones_ficticias():
     """Corrige fontaneros que aún tienen el 5.0 de relleno de antes de tener reseñas reales."""
