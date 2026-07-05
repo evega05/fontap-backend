@@ -32,6 +32,7 @@ class UsuarioRespuesta(BaseModel):
 
 class FontaneroRespuesta(BaseModel):
     id: int
+    usuario_id: Optional[int] = None
     nombre: Optional[str] = None
     zona: Optional[str] = None
     disponible: bool
