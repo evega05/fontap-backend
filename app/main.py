@@ -204,6 +204,22 @@ def actualizar_disponibilidad(
     db.commit()
     return {"mensaje": "Disponibilidad actualizada"}
 
+@app.put("/fontaneros/{fontanero_id}/ubicacion")
+def actualizar_ubicacion(
+    fontanero_id: int,
+    datos: schemas.UbicacionActualizar,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = get_or_create_fontanero(db, fontanero_id)
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    fontanero.latitud = datos.latitud
+    fontanero.longitud = datos.longitud
+    fontanero.ubicacion_actualizada = models.utcnow()
+    db.commit()
+    return {"mensaje": "Ubicación actualizada"}
+
 @app.get("/fontaneros/{fontanero_id}/solicitudes")
 def ver_solicitudes_fontanero(
     fontanero_id: int,
