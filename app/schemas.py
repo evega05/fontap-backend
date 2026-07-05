@@ -38,6 +38,9 @@ class FontaneroRespuesta(BaseModel):
     disponible: bool
     disponible_24h: bool = False
     valoracion: Optional[float] = None
+    latitud: Optional[float] = None
+    longitud: Optional[float] = None
+    ubicacion_actualizada: Optional[datetime.datetime] = None
     foto_url: Optional[str] = None
     descripcion: Optional[str] = None
     especialidades: Optional[str] = None
@@ -55,6 +58,10 @@ class FontaneroActualizar(BaseModel):
     especialidades: Optional[str] = None
     disponible_24h: Optional[bool] = None
     gremio: Optional[str] = None
+
+class UbicacionActualizar(BaseModel):
+    latitud: float
+    longitud: float
 
 class VacacionesCrear(BaseModel):
     desde: datetime.datetime
