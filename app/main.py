@@ -601,6 +601,54 @@ def marcar_mensajes_leidos(
     db.commit()
     return {"mensaje": "Mensajes marcados como leídos"}
 
+@app.get("/usuarios/{usuario_id}/chats")
+def listar_chats_recientes(
+    usuario_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == usuario_id).first()
+    fontanero_id = fontanero.id if fontanero else None
+    servicios = db.query(models.Servicio).filter(
+        or_(
+            models.Servicio.cliente_id == usuario_id,
+            models.Servicio.fontanero_id == fontanero_id,
+        )
+    ).all()
+
+    resultado = []
+    for s in servicios:
+        ultimo = db.query(models.Mensaje).filter(
+            models.Mensaje.servicio_id == s.id
+        ).order_by(models.Mensaje.creado_en.desc()).first()
+        if not ultimo:
+            continue
+        no_leidos = db.query(models.Mensaje).filter(
+            models.Mensaje.servicio_id == s.id,
+            models.Mensaje.emisor_id != usuario_id,
+            models.Mensaje.leido == False,
+        ).count()
+        if usuario_id == s.cliente_id:
+            otro_nombre = "Profesional"
+            if s.fontanero_id:
+                fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == s.fontanero_id).first()
+                if fontanero_obj and fontanero_obj.nombre:
+                    otro_nombre = fontanero_obj.nombre
+        else:
+            cliente_obj = db.query(models.Usuario).filter(models.Usuario.id == s.cliente_id).first()
+            otro_nombre = cliente_obj.nombre if cliente_obj else "Cliente"
+        resultado.append({
+            "servicio_id": s.id,
+            "tipo_servicio": s.tipo,
+            "estado": s.estado,
+            "otro_participante": otro_nombre,
+            "ultimo_mensaje": ultimo.texto,
+            "ultimo_mensaje_fecha": str(ultimo.creado_en),
+            "no_leidos": no_leidos,
+        })
+    resultado.sort(key=lambda c: c["ultimo_mensaje_fecha"], reverse=True)
+    return resultado
+
 # ─── NOTIFICACIONES PUSH ───────────────────────────────────────────────────────
 
 @app.post("/usuarios/{usuario_id}/push-token")
