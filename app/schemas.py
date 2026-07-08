@@ -34,6 +34,7 @@ class FontaneroRespuesta(BaseModel):
     id: int
     usuario_id: Optional[int] = None
     nombre: Optional[str] = None
+    telefono: Optional[str] = None
     zona: Optional[str] = None
     disponible: bool
     disponible_24h: bool = False
