@@ -94,7 +94,7 @@ def reset_datos(db):
 def sembrar_fontaneros(db):
     hash_pw = auth.hashear_password(PASSWORD_PRUEBA)
     for i, f in enumerate(FONTANEROS, start=1):
-        email = f"fontanero{i}@fontap.test"
+        email = f"fontanero{i}@fontap-demo.com"
         usuario = models.Usuario(
             nombre=f["nombre"], email=email, telefono=f"6000000{i:02d}",
             password_hash=hash_pw, tipo="fontanero",
