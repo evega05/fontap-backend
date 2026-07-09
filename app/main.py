@@ -1734,9 +1734,11 @@ def conectar_stripe_fontanero(
     """Genera (o reanuda) el onboarding de Stripe Connect Express para que el
     fontanero reciba sus cobros directo a su cuenta bancaria."""
     stripe = _stripe_o_501()
-    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
-    if not fontanero or fontanero.usuario_id != current_user["id"]:
+    if fontanero_id != current_user["id"]:
         raise HTTPException(status_code=403, detail="Solo el propio fontanero puede conectar su cuenta")
+    fontanero = get_or_create_fontanero(db, fontanero_id)
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
 
     if not fontanero.stripe_account_id:
         cuenta = stripe.Account.create(
@@ -1762,7 +1764,7 @@ def estado_stripe_fontanero(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
     if not fontanero.stripe_account_id:
@@ -1779,11 +1781,13 @@ def comision_pendiente(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
-    if not fontanero or fontanero.usuario_id != current_user["id"]:
+    if fontanero_id != current_user["id"]:
         raise HTTPException(status_code=403, detail="No puedes ver la comisión de otro fontanero")
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
     pendientes = db.query(models.Servicio).filter(
-        models.Servicio.fontanero_id == fontanero_id,
+        models.Servicio.fontanero_id == fontanero.id,
         models.Servicio.comision_liquidada == False,
         models.Servicio.comision_aplicada != None,
     ).all()
@@ -1797,11 +1801,13 @@ def pagar_comision_pendiente(
     current_user: dict = Depends(auth.get_current_user),
 ):
     stripe = _stripe_o_501()
-    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
-    if not fontanero or fontanero.usuario_id != current_user["id"]:
+    if fontanero_id != current_user["id"]:
         raise HTTPException(status_code=403, detail="No puedes pagar la comisión de otro fontanero")
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
     pendientes = db.query(models.Servicio).filter(
-        models.Servicio.fontanero_id == fontanero_id,
+        models.Servicio.fontanero_id == fontanero.id,
         models.Servicio.comision_liquidada == False,
         models.Servicio.comision_aplicada != None,
     ).all()
@@ -1836,15 +1842,17 @@ def verificar_comision_pendiente(
     current_user: dict = Depends(auth.get_current_user),
 ):
     stripe = _stripe_o_501()
-    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
-    if not fontanero or fontanero.usuario_id != current_user["id"]:
+    if fontanero_id != current_user["id"]:
         raise HTTPException(status_code=403, detail="No puedes verificar la comisión de otro fontanero")
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
     if not fontanero.comision_checkout_session:
         raise HTTPException(status_code=400, detail="No hay un pago de comisión en curso")
     session = stripe.checkout.Session.retrieve(fontanero.comision_checkout_session)
     if session.payment_status == "paid":
         db.query(models.Servicio).filter(
-            models.Servicio.fontanero_id == fontanero_id,
+            models.Servicio.fontanero_id == fontanero.id,
             models.Servicio.comision_liquidada == False,
         ).update({"comision_liquidada": True}, synchronize_session=False)
         fontanero.comision_checkout_session = None
