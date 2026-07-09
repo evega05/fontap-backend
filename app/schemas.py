@@ -16,6 +16,7 @@ class UsuarioRegistro(BaseModel):
     telefono: str
     password: str
     tipo: Literal["cliente", "fontanero", "administrador_fincas"] = "cliente"
+    terminos_aceptados: bool = False
 
 class UsuarioLogin(BaseModel):
     email: EmailStr
@@ -262,6 +263,25 @@ class ResenaRespuesta(BaseModel):
     trato: float
     comentario: Optional[str] = None
     creado_en: datetime.datetime
+
+class ResenaClienteCrear(BaseModel):
+    puntualidad: float
+    trato: float
+    comunicacion: float
+    comentario: Optional[str] = None
+
+class ResenaClienteRespuesta(BaseModel):
+    id: int
+    servicio_id: int
+    fontanero_id: int
+    cliente_id: int
+    puntualidad: float
+    trato: float
+    comunicacion: float
+    comentario: Optional[str] = None
+    creado_en: datetime.datetime
+    class Config:
+        from_attributes = True
     class Config:
         from_attributes = True
 

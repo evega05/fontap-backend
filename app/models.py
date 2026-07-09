@@ -14,6 +14,7 @@ class Usuario(Base):
     telefono = Column(String)
     password_hash = Column(String, nullable=False)
     tipo = Column(String, default="cliente")  # cliente, fontanero, admin, administrador_fincas
+    terminos_aceptados = Column(Boolean, default=False)
     creado_en = Column(DateTime, default=utcnow)
 
 class Fontanero(Base):
@@ -155,6 +156,27 @@ class Resena(Base):
     precio_justo = Column(Float)
     trato = Column(Float)
     comentario = Column(Text, nullable=True)
+    creado_en = Column(DateTime, default=utcnow)
+
+class ResenaCliente(Base):
+    __tablename__ = "resenas_cliente"
+    id = Column(Integer, primary_key=True, index=True)
+    servicio_id = Column(Integer, ForeignKey("servicios.id"), unique=True)
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    cliente_id = Column(Integer, ForeignKey("usuarios.id"))
+    puntualidad = Column(Float)
+    trato = Column(Float)
+    comunicacion = Column(Float)
+    comentario = Column(Text, nullable=True)
+    creado_en = Column(DateTime, default=utcnow)
+
+class PasswordReset(Base):
+    __tablename__ = "password_resets"
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    token = Column(String, index=True)
+    expira = Column(DateTime)
+    usado = Column(Boolean, default=False)
     creado_en = Column(DateTime, default=utcnow)
 
 class Cita(Base):
