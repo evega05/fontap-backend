@@ -36,6 +36,7 @@ def _migrar_columnas_faltantes():
         },
         "usuarios": {
             "terminos_aceptados": "BOOLEAN DEFAULT FALSE",
+            "email_verificado": "BOOLEAN DEFAULT FALSE",
         },
         "servicios": {
             "comision_liquidada": "BOOLEAN DEFAULT TRUE",
@@ -195,6 +196,14 @@ def registrar_usuario(usuario: schemas.UsuarioRegistro, db: Session = Depends(ge
     if usuario.tipo == "fontanero":
         get_or_create_fontanero(db, nuevo.id)
 
+    token_verificacion = secrets.token_hex(4).upper()
+    db.add(models.VerificacionEmail(
+        usuario_id=nuevo.id, token=token_verificacion,
+        expira=datetime.datetime.utcnow() + datetime.timedelta(minutes=30),
+    ))
+    db.commit()
+    _enviar_email_verificacion(nuevo.email, token_verificacion)
+
     token = auth.crear_token({"sub": nuevo.email, "tipo": nuevo.tipo, "id": nuevo.id})
     return {
         "access_token": token,
@@ -220,17 +229,13 @@ def login(datos: schemas.UsuarioLogin, db: Session = Depends(get_db)):
         "email": usuario.email,
     }
 
-def _enviar_email_reset(destinatario: str, token: str):
-    cuerpo = (
-        f"Tu código para restablecer tu contraseña en FonTap es:\n\n{token}\n\n"
-        "Caduca en 30 minutos. Si no lo solicitaste, ignora este correo."
-    )
+def _enviar_email(destinatario: str, asunto: str, cuerpo: str, etiqueta: str, codigo: str = None):
     if not SMTP_HOST:
-        print(f"[reset-password] SMTP no configurado. Código para {destinatario}: {token}")
+        print(f"[{etiqueta}] SMTP no configurado. Código para {destinatario}: {codigo or '(ver cuerpo)'}")
         return
     try:
         msg = MIMEText(cuerpo)
-        msg["Subject"] = "Recupera tu contraseña — FonTap"
+        msg["Subject"] = asunto
         msg["From"] = SMTP_FROM
         msg["To"] = destinatario
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
@@ -238,7 +243,21 @@ def _enviar_email_reset(destinatario: str, token: str):
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SMTP_FROM, [destinatario], msg.as_string())
     except Exception as e:
-        print(f"[reset-password] Error enviando email a {destinatario}: {e}")
+        print(f"[{etiqueta}] Error enviando email a {destinatario}: {e}")
+
+def _enviar_email_reset(destinatario: str, token: str):
+    cuerpo = (
+        f"Tu código para restablecer tu contraseña en FonTap es:\n\n{token}\n\n"
+        "Caduca en 30 minutos. Si no lo solicitaste, ignora este correo."
+    )
+    _enviar_email(destinatario, "Recupera tu contraseña — FonTap", cuerpo, "reset-password", token)
+
+def _enviar_email_verificacion(destinatario: str, token: str):
+    cuerpo = (
+        f"Tu código para verificar tu email en FonTap es:\n\n{token}\n\n"
+        "Caduca en 30 minutos. Si no creaste esta cuenta, ignora este correo."
+    )
+    _enviar_email(destinatario, "Verifica tu email — FonTap", cuerpo, "verificar-email", token)
 
 class OlvidePasswordDatos(BaseModel):
     email: str
@@ -282,6 +301,100 @@ def resetear_password(datos: ResetPasswordDatos, db: Session = Depends(get_db)):
     reset.usado = True
     db.commit()
     return {"mensaje": "Contraseña actualizada"}
+
+class VerificarEmailDatos(BaseModel):
+    email: str
+    token: str
+
+@app.post("/auth/verificar-email")
+def verificar_email(datos: VerificarEmailDatos, db: Session = Depends(get_db)):
+    usuario = db.query(models.Usuario).filter(models.Usuario.email == datos.email).first()
+    error_generico = HTTPException(status_code=400, detail="Código inválido o caducado")
+    if not usuario:
+        raise error_generico
+    if usuario.email_verificado:
+        return {"mensaje": "Email ya verificado"}
+    verificacion = db.query(models.VerificacionEmail).filter(
+        models.VerificacionEmail.usuario_id == usuario.id,
+        models.VerificacionEmail.token == datos.token.strip().upper(),
+        models.VerificacionEmail.usado == False,
+    ).order_by(models.VerificacionEmail.id.desc()).first()
+    if not verificacion or verificacion.expira < datetime.datetime.utcnow():
+        raise error_generico
+    usuario.email_verificado = True
+    verificacion.usado = True
+    db.commit()
+    return {"mensaje": "Email verificado"}
+
+class ReenviarVerificacionDatos(BaseModel):
+    email: str
+
+@app.post("/auth/reenviar-verificacion")
+def reenviar_verificacion(datos: ReenviarVerificacionDatos, db: Session = Depends(get_db)):
+    usuario = db.query(models.Usuario).filter(models.Usuario.email == datos.email).first()
+    if usuario and not usuario.email_verificado:
+        token = secrets.token_hex(4).upper()
+        db.add(models.VerificacionEmail(
+            usuario_id=usuario.id, token=token,
+            expira=datetime.datetime.utcnow() + datetime.timedelta(minutes=30),
+        ))
+        db.commit()
+        _enviar_email_verificacion(usuario.email, token)
+    return {"mensaje": "Si el email existe y no está verificado, se envió un nuevo código"}
+
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+
+class GoogleAuthDatos(BaseModel):
+    id_token: str
+    tipo: Optional[str] = "cliente"
+
+@app.post("/auth/google", response_model=schemas.Token)
+def login_google(datos: GoogleAuthDatos, db: Session = Depends(get_db)):
+    """Verifica el id_token que devuelve Google en el flujo de Sign in with Google
+    (vía expo-auth-session en el frontend) contra el propio endpoint de Google,
+    y crea la cuenta o inicia sesión si ya existe."""
+    try:
+        resp = _http.get(
+            "https://oauth2.googleapis.com/tokeninfo",
+            params={"id_token": datos.id_token},
+            timeout=8,
+        )
+        info = resp.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="No se pudo verificar el token de Google")
+    if resp.status_code != 200 or "email" not in info:
+        raise HTTPException(status_code=401, detail="Token de Google inválido")
+    if GOOGLE_CLIENT_ID and info.get("aud") != GOOGLE_CLIENT_ID:
+        raise HTTPException(status_code=401, detail="Token de Google no corresponde a esta app")
+
+    email = info["email"]
+    nombre = info.get("name") or email.split("@")[0]
+    usuario = db.query(models.Usuario).filter(models.Usuario.email == email).first()
+    if not usuario:
+        usuario = models.Usuario(
+            nombre=nombre,
+            email=email,
+            telefono="",
+            password_hash=auth.hashear_password(secrets.token_hex(16)),
+            tipo=datos.tipo if datos.tipo in ["cliente", "fontanero"] else "cliente",
+            terminos_aceptados=True,
+            email_verificado=True,  # Google ya verificó este email
+        )
+        db.add(usuario)
+        db.commit()
+        db.refresh(usuario)
+        if usuario.tipo == "fontanero":
+            get_or_create_fontanero(db, usuario.id)
+
+    token = auth.crear_token({"sub": usuario.email, "tipo": usuario.tipo, "id": usuario.id})
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "tipo_usuario": usuario.tipo,
+        "nombre": usuario.nombre,
+        "id": usuario.id,
+        "email": usuario.email,
+    }
 
 # ─── FONTANEROS ────────────────────────────────────────────────────────────────
 
