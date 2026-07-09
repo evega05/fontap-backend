@@ -38,6 +38,8 @@ class Fontanero(Base):
     gremio = Column(String, default="fontanero")  # fontanero, electricista, pintor, cerrajero
     verificado = Column(Boolean, default=False)
     num_trabajos = Column(Integer, default=0)
+    stripe_account_id = Column(String, nullable=True)
+    comision_checkout_session = Column(String, nullable=True)
 
 class Servicio(Base):
     __tablename__ = "servicios"
@@ -54,6 +56,7 @@ class Servicio(Base):
     fecha = Column(DateTime, nullable=True)
     eta_minutos = Column(Integer, nullable=True)
     comision_aplicada = Column(Float, nullable=True)
+    comision_liquidada = Column(Boolean, default=True)
     stripe_payment_intent = Column(String, nullable=True)
     creado_en = Column(DateTime, default=utcnow)
 

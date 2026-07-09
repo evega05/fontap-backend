@@ -31,9 +31,14 @@ def _migrar_columnas_faltantes():
             "latitud": "FLOAT",
             "longitud": "FLOAT",
             "ubicacion_actualizada": "TIMESTAMP",
+            "stripe_account_id": "VARCHAR",
+            "comision_checkout_session": "VARCHAR",
         },
         "usuarios": {
             "terminos_aceptados": "BOOLEAN DEFAULT FALSE",
+        },
+        "servicios": {
+            "comision_liquidada": "BOOLEAN DEFAULT TRUE",
         },
     }
     with engine.begin() as conn:
@@ -509,6 +514,11 @@ def confirmar_pago(
     nuevo_estado = "pago_pendiente" if datos.metodo == "efectivo" else "pagado"
     servicio.estado = nuevo_estado
     servicio.metodo_pago = datos.metodo
+    if datos.metodo not in ["efectivo", "stripe"]:
+        # El dinero (ej. Bizum) va directo cliente→fontanero, sin pasar por FonTap:
+        # queda pendiente que el fontanero liquide la comisión de la plataforma.
+        servicio.comision_aplicada = round(servicio.precio * 0.05, 2)
+        servicio.comision_liquidada = False
     if servicio.fontanero_id:
         fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
         if fontanero_obj and fontanero_obj.usuario_id:
@@ -526,6 +536,10 @@ def confirmar_efectivo(
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
     servicio.estado = "pagado"
+    # El efectivo va directo cliente→fontanero: la comisión de FonTap queda
+    # pendiente de que el fontanero la liquide (ver /comision-pendiente).
+    servicio.comision_aplicada = round((servicio.precio or 0) * 0.05, 2)
+    servicio.comision_liquidada = False
     db.commit()
     return {"mensaje": "Efectivo confirmado"}
 
@@ -1627,8 +1641,10 @@ def crear_stripe_checkout(
     if servicio.cliente_id != current_user["id"]:
         raise HTTPException(status_code=403, detail="Solo el cliente puede pagar este servicio")
 
-    base_url = os.getenv("BACKEND_URL", "https://fontap-backend-production.up.railway.app")
-    session = stripe.checkout.Session.create(
+    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
+    comision_centavos = round(servicio.precio * 100 * 0.05)
+
+    checkout_kwargs = dict(
         mode="payment",
         payment_method_types=["card"],
         line_items=[{
@@ -1640,9 +1656,17 @@ def crear_stripe_checkout(
             "quantity": 1,
         }],
         metadata={"servicio_id": str(servicio_id)},
-        success_url=f"{base_url}/pago-resultado?estado=ok",
-        cancel_url=f"{base_url}/pago-resultado?estado=cancelado",
+        success_url=f"{os.getenv('BACKEND_URL', 'https://fontap-backend-production.up.railway.app')}/pago-resultado?estado=ok",
+        cancel_url=f"{os.getenv('BACKEND_URL', 'https://fontap-backend-production.up.railway.app')}/pago-resultado?estado=cancelado",
     )
+    # Si el fontanero ya conectó su cuenta de Stripe, repartimos automático:
+    # la comisión se queda en FonTap, el resto va directo a su cuenta.
+    if fontanero_obj and fontanero_obj.stripe_account_id:
+        checkout_kwargs["payment_intent_data"] = {
+            "application_fee_amount": comision_centavos,
+            "transfer_data": {"destination": fontanero_obj.stripe_account_id},
+        }
+    session = stripe.checkout.Session.create(**checkout_kwargs)
     servicio.stripe_payment_intent = session.id
     db.commit()
     return {"checkout_url": session.url, "session_id": session.id}
@@ -1671,6 +1695,7 @@ def verificar_stripe_checkout(
         servicio.metodo_pago = "stripe"
         comision = round((servicio.precio or 0) * 0.05, 2)
         servicio.comision_aplicada = comision
+        servicio.comision_liquidada = True  # Stripe ya retuvo/repartió la comisión al cobrar
         if servicio.fontanero_id:
             fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
             if fontanero_obj and fontanero_obj.usuario_id:
@@ -1690,6 +1715,141 @@ def pago_resultado(estado: str = "ok"):
     h1{{font-size:22px}} p{{color:#9AA6B8}}</style></head>
     <body><h1>{titulo}</h1><p>{texto}</p></body></html>"""
     return HTMLResponse(html)
+
+# ─── STRIPE CONNECT (cobro automático para el fontanero) ─────────────────────
+
+def _stripe_o_501():
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=501, detail="Stripe no configurado. Añade STRIPE_SECRET_KEY en variables de entorno.")
+    import stripe
+    stripe.api_key = STRIPE_SECRET_KEY
+    return stripe
+
+@app.post("/fontaneros/{fontanero_id}/stripe/conectar")
+def conectar_stripe_fontanero(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Genera (o reanuda) el onboarding de Stripe Connect Express para que el
+    fontanero reciba sus cobros directo a su cuenta bancaria."""
+    stripe = _stripe_o_501()
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+    if not fontanero or fontanero.usuario_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Solo el propio fontanero puede conectar su cuenta")
+
+    if not fontanero.stripe_account_id:
+        cuenta = stripe.Account.create(
+            type="express",
+            email=current_user.get("sub"),
+            capabilities={"card_payments": {"requested": True}, "transfers": {"requested": True}},
+        )
+        fontanero.stripe_account_id = cuenta.id
+        db.commit()
+
+    base_url = os.getenv("BACKEND_URL", "https://fontap-backend-production.up.railway.app")
+    link = stripe.AccountLink.create(
+        account=fontanero.stripe_account_id,
+        refresh_url=f"{base_url}/pago-resultado?estado=cancelado",
+        return_url=f"{base_url}/pago-resultado?estado=ok",
+        type="account_onboarding",
+    )
+    return {"onboarding_url": link.url}
+
+@app.get("/fontaneros/{fontanero_id}/stripe/estado")
+def estado_stripe_fontanero(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    if not fontanero.stripe_account_id:
+        return {"conectado": False, "cobros_activos": False}
+    stripe = _stripe_o_501()
+    cuenta = stripe.Account.retrieve(fontanero.stripe_account_id)
+    return {"conectado": True, "cobros_activos": bool(cuenta.charges_enabled)}
+
+# ─── COMISIÓN PENDIENTE (pagos en efectivo/Bizum que no pasan por Stripe) ─────
+
+@app.get("/fontaneros/{fontanero_id}/comision-pendiente")
+def comision_pendiente(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+    if not fontanero or fontanero.usuario_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="No puedes ver la comisión de otro fontanero")
+    pendientes = db.query(models.Servicio).filter(
+        models.Servicio.fontanero_id == fontanero_id,
+        models.Servicio.comision_liquidada == False,
+        models.Servicio.comision_aplicada != None,
+    ).all()
+    total = round(sum(s.comision_aplicada for s in pendientes), 2)
+    return {"total": total, "servicios": [s.id for s in pendientes]}
+
+@app.post("/fontaneros/{fontanero_id}/comision-pendiente/pagar")
+def pagar_comision_pendiente(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    stripe = _stripe_o_501()
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+    if not fontanero or fontanero.usuario_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="No puedes pagar la comisión de otro fontanero")
+    pendientes = db.query(models.Servicio).filter(
+        models.Servicio.fontanero_id == fontanero_id,
+        models.Servicio.comision_liquidada == False,
+        models.Servicio.comision_aplicada != None,
+    ).all()
+    total = round(sum(s.comision_aplicada for s in pendientes), 2)
+    if total <= 0:
+        raise HTTPException(status_code=400, detail="No tienes comisión pendiente")
+
+    base_url = os.getenv("BACKEND_URL", "https://fontap-backend-production.up.railway.app")
+    session = stripe.checkout.Session.create(
+        mode="payment",
+        payment_method_types=["card"],
+        line_items=[{
+            "price_data": {
+                "currency": "eur",
+                "product_data": {"name": "FonTap — comisión pendiente"},
+                "unit_amount": round(total * 100),
+            },
+            "quantity": 1,
+        }],
+        metadata={"fontanero_id": str(fontanero_id), "tipo": "comision_pendiente"},
+        success_url=f"{base_url}/pago-resultado?estado=ok",
+        cancel_url=f"{base_url}/pago-resultado?estado=cancelado",
+    )
+    fontanero.comision_checkout_session = session.id
+    db.commit()
+    return {"checkout_url": session.url, "session_id": session.id, "total": total}
+
+@app.post("/fontaneros/{fontanero_id}/comision-pendiente/verificar")
+def verificar_comision_pendiente(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    stripe = _stripe_o_501()
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+    if not fontanero or fontanero.usuario_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="No puedes verificar la comisión de otro fontanero")
+    if not fontanero.comision_checkout_session:
+        raise HTTPException(status_code=400, detail="No hay un pago de comisión en curso")
+    session = stripe.checkout.Session.retrieve(fontanero.comision_checkout_session)
+    if session.payment_status == "paid":
+        db.query(models.Servicio).filter(
+            models.Servicio.fontanero_id == fontanero_id,
+            models.Servicio.comision_liquidada == False,
+        ).update({"comision_liquidada": True}, synchronize_session=False)
+        fontanero.comision_checkout_session = None
+        db.commit()
+    return {"liquidada": session.payment_status == "paid"}
 
 # ─── BIZUM ────────────────────────────────────────────────────────────────────
 
