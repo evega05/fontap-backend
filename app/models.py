@@ -15,6 +15,7 @@ class Usuario(Base):
     password_hash = Column(String, nullable=False)
     tipo = Column(String, default="cliente")  # cliente, fontanero, admin, administrador_fincas
     terminos_aceptados = Column(Boolean, default=False)
+    email_verificado = Column(Boolean, default=False)
     creado_en = Column(DateTime, default=utcnow)
 
 class Fontanero(Base):
@@ -171,6 +172,15 @@ class ResenaCliente(Base):
     trato = Column(Float)
     comunicacion = Column(Float)
     comentario = Column(Text, nullable=True)
+    creado_en = Column(DateTime, default=utcnow)
+
+class VerificacionEmail(Base):
+    __tablename__ = "verificaciones_email"
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    token = Column(String, index=True)
+    expira = Column(DateTime)
+    usado = Column(Boolean, default=False)
     creado_en = Column(DateTime, default=utcnow)
 
 class PasswordReset(Base):
