@@ -7,12 +7,17 @@ from typing import List, Optional
 from pydantic import BaseModel
 from . import models, schemas, auth
 from .database import engine, get_db
-import os, uuid, requests as _http
+import os, uuid, requests as _http, secrets, smtplib, datetime
+from email.mime.text import MIMEText
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-FCM_SERVER_KEY = os.getenv("FCM_SERVER_KEY", "")
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")
+SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -20,20 +25,25 @@ def _migrar_columnas_faltantes():
     """create_all() no altera tablas ya existentes: agrega columnas nuevas del modelo
     que todavía no existan en la base de datos real (necesario tras cada cambio de esquema)."""
     inspector = inspect(engine)
-    if "fontaneros" not in inspector.get_table_names():
-        return
-    existentes = {c["name"] for c in inspector.get_columns("fontaneros")}
-    columnas_nuevas = {
-        "latitud": "FLOAT",
-        "longitud": "FLOAT",
-        "ubicacion_actualizada": "TIMESTAMP",
+    tablas = inspector.get_table_names()
+    por_tabla = {
+        "fontaneros": {
+            "latitud": "FLOAT",
+            "longitud": "FLOAT",
+            "ubicacion_actualizada": "TIMESTAMP",
+        },
+        "usuarios": {
+            "terminos_aceptados": "BOOLEAN DEFAULT FALSE",
+        },
     }
-    faltantes = {nombre: tipo for nombre, tipo in columnas_nuevas.items() if nombre not in existentes}
-    if not faltantes:
-        return
     with engine.begin() as conn:
-        for nombre, tipo in faltantes.items():
-            conn.execute(text(f"ALTER TABLE fontaneros ADD COLUMN {nombre} {tipo}"))
+        for tabla, columnas_nuevas in por_tabla.items():
+            if tabla not in tablas:
+                continue
+            existentes = {c["name"] for c in inspector.get_columns(tabla)}
+            faltantes = {n: t for n, t in columnas_nuevas.items() if n not in existentes}
+            for nombre, tipo in faltantes.items():
+                conn.execute(text(f"ALTER TABLE {tabla} ADD COLUMN {nombre} {tipo}"))
 
 _migrar_columnas_faltantes()
 
@@ -101,21 +111,28 @@ def _crear_notificacion(db: Session, usuario_id: int, titulo: str, cuerpo: str, 
     )
     db.add(notif)
     db.flush()
-    if FCM_SERVER_KEY:
-        tokens = db.query(models.TokenPush).filter(
-            models.TokenPush.usuario_id == usuario_id,
-            models.TokenPush.activo == True,
-        ).all()
-        for t in tokens:
-            try:
-                _http.post(
-                    "https://fcm.googleapis.com/fcm/send",
-                    json={"to": t.token, "notification": {"title": titulo, "body": cuerpo}},
-                    headers={"Authorization": f"key={FCM_SERVER_KEY}"},
-                    timeout=5,
-                )
-            except Exception:
-                pass
+    tokens = db.query(models.TokenPush).filter(
+        models.TokenPush.usuario_id == usuario_id,
+        models.TokenPush.activo == True,
+    ).all()
+    for t in tokens:
+        # Los tokens se registran con expo-notifications (formato ExponentPushToken[...]),
+        # así que se mandan al servicio push de Expo, no a FCM directo.
+        try:
+            _http.post(
+                "https://exp.host/--/api/v2/push/send",
+                json={
+                    "to": t.token,
+                    "title": titulo,
+                    "body": cuerpo,
+                    "sound": "default",
+                    "data": {"tipo": tipo, "referencia_id": referencia_id},
+                },
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                timeout=5,
+            )
+        except Exception:
+            pass
 
 # ─── AUTH ──────────────────────────────────────────────────────────────────────
 
@@ -164,6 +181,7 @@ def registrar_usuario(usuario: schemas.UsuarioRegistro, db: Session = Depends(ge
         telefono=usuario.telefono,
         password_hash=auth.hashear_password(usuario.password),
         tipo=usuario.tipo,
+        terminos_aceptados=usuario.terminos_aceptados,
     )
     db.add(nuevo)
     db.commit()
@@ -196,6 +214,69 @@ def login(datos: schemas.UsuarioLogin, db: Session = Depends(get_db)):
         "id": usuario.id,
         "email": usuario.email,
     }
+
+def _enviar_email_reset(destinatario: str, token: str):
+    cuerpo = (
+        f"Tu código para restablecer tu contraseña en FonTap es:\n\n{token}\n\n"
+        "Caduca en 30 minutos. Si no lo solicitaste, ignora este correo."
+    )
+    if not SMTP_HOST:
+        print(f"[reset-password] SMTP no configurado. Código para {destinatario}: {token}")
+        return
+    try:
+        msg = MIMEText(cuerpo)
+        msg["Subject"] = "Recupera tu contraseña — FonTap"
+        msg["From"] = SMTP_FROM
+        msg["To"] = destinatario
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.sendmail(SMTP_FROM, [destinatario], msg.as_string())
+    except Exception as e:
+        print(f"[reset-password] Error enviando email a {destinatario}: {e}")
+
+class OlvidePasswordDatos(BaseModel):
+    email: str
+
+@app.post("/auth/olvide-password")
+def olvide_password(datos: OlvidePasswordDatos, db: Session = Depends(get_db)):
+    usuario = db.query(models.Usuario).filter(models.Usuario.email == datos.email).first()
+    if usuario:
+        token = secrets.token_hex(4).upper()
+        reset = models.PasswordReset(
+            usuario_id=usuario.id, token=token,
+            expira=datetime.datetime.utcnow() + datetime.timedelta(minutes=30),
+        )
+        db.add(reset)
+        db.commit()
+        _enviar_email_reset(usuario.email, token)
+    # Respuesta genérica siempre, para no revelar si el email existe o no
+    return {"mensaje": "Si el email existe, se envió un código de recuperación"}
+
+class ResetPasswordDatos(BaseModel):
+    email: str
+    token: str
+    nueva_password: str
+
+@app.post("/auth/resetear-password")
+def resetear_password(datos: ResetPasswordDatos, db: Session = Depends(get_db)):
+    usuario = db.query(models.Usuario).filter(models.Usuario.email == datos.email).first()
+    error_generico = HTTPException(status_code=400, detail="Código inválido o caducado")
+    if not usuario:
+        raise error_generico
+    reset = db.query(models.PasswordReset).filter(
+        models.PasswordReset.usuario_id == usuario.id,
+        models.PasswordReset.token == datos.token.strip().upper(),
+        models.PasswordReset.usado == False,
+    ).order_by(models.PasswordReset.id.desc()).first()
+    if not reset or reset.expira < datetime.datetime.utcnow():
+        raise error_generico
+    if len(datos.nueva_password) < 6:
+        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 6 caracteres")
+    usuario.password_hash = auth.hashear_password(datos.nueva_password)
+    reset.usado = True
+    db.commit()
+    return {"mensaje": "Contraseña actualizada"}
 
 # ─── FONTANEROS ────────────────────────────────────────────────────────────────
 
@@ -447,6 +528,38 @@ def confirmar_efectivo(
     servicio.estado = "pagado"
     db.commit()
     return {"mensaje": "Efectivo confirmado"}
+
+@app.put("/servicios/{servicio_id}/cancelar")
+def cancelar_servicio(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+
+    es_cliente = servicio.cliente_id == current_user["id"]
+    fontanero_actual = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == current_user["id"]
+    ).first()
+    es_fontanero = bool(fontanero_actual) and servicio.fontanero_id == fontanero_actual.id
+    if not es_cliente and not es_fontanero:
+        raise HTTPException(status_code=403, detail="No puedes cancelar un servicio que no es tuyo")
+    if servicio.estado in ["pagado", "completado", "cancelado"]:
+        raise HTTPException(status_code=400, detail="Este servicio ya no se puede cancelar")
+
+    servicio.estado = "cancelado"
+    db.commit()
+
+    if es_cliente and servicio.fontanero_id:
+        fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
+        if fontanero_obj and fontanero_obj.usuario_id:
+            _crear_notificacion(db, fontanero_obj.usuario_id, "Servicio cancelado", "El cliente ha cancelado la solicitud", "cancelado", servicio_id)
+    elif es_fontanero:
+        _crear_notificacion(db, servicio.cliente_id, "Servicio cancelado", "El profesional ha cancelado el servicio", "cancelado", servicio_id)
+    db.commit()
+    return {"mensaje": "Servicio cancelado"}
 
 @app.get("/clientes/{cliente_id}/servicios")
 def ver_servicios_cliente(
@@ -1274,6 +1387,38 @@ def ver_resenas(fontanero_id: int, db: Session = Depends(get_db)):
         models.Resena.fontanero_id == fontanero.id
     ).order_by(models.Resena.creado_en.desc()).all()
 
+@app.post("/servicios/{servicio_id}/resena-cliente", response_model=schemas.ResenaClienteRespuesta)
+def crear_resena_cliente(
+    servicio_id: int,
+    datos: schemas.ResenaClienteCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    if servicio.estado != "pagado":
+        raise HTTPException(status_code=400, detail="Solo se puede reseñar servicios pagados")
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
+    if not fontanero or servicio.fontanero_id != fontanero.id:
+        raise HTTPException(status_code=403, detail="Solo el fontanero del servicio puede reseñar al cliente")
+    existente = db.query(models.ResenaCliente).filter(models.ResenaCliente.servicio_id == servicio_id).first()
+    if existente:
+        raise HTTPException(status_code=400, detail="Ya existe una reseña del cliente para este servicio")
+    resena = models.ResenaCliente(
+        servicio_id=servicio_id,
+        fontanero_id=fontanero.id,
+        cliente_id=servicio.cliente_id,
+        puntualidad=datos.puntualidad,
+        trato=datos.trato,
+        comunicacion=datos.comunicacion,
+        comentario=datos.comentario,
+    )
+    db.add(resena)
+    db.commit()
+    db.refresh(resena)
+    return resena
+
 # ─── CALENDARIO INTERNO ───────────────────────────────────────────────────────
 
 @app.post("/fontaneros/{fontanero_id}/citas", response_model=schemas.CitaRespuesta)
@@ -1459,6 +1604,92 @@ def confirmar_stripe(
             _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido por Stripe", f"Pago de {servicio.precio}€ confirmado", "pago_recibido", servicio_id)
     db.commit()
     return {"mensaje": "Pago confirmado", "precio": servicio.precio, "comision": comision}
+
+@app.post("/servicios/{servicio_id}/stripe/crear-checkout")
+def crear_stripe_checkout(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Pago real vía la página alojada de Stripe (Checkout): no requiere SDK nativo,
+    así que funciona con Expo Go — el navegador se abre con expo-web-browser."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=501, detail="Stripe no configurado. Añade STRIPE_SECRET_KEY en variables de entorno.")
+    try:
+        import stripe
+        stripe.api_key = STRIPE_SECRET_KEY
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Librería stripe no instalada.")
+
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio or not servicio.precio:
+        raise HTTPException(status_code=400, detail="Servicio no encontrado o sin precio")
+    if servicio.cliente_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Solo el cliente puede pagar este servicio")
+
+    base_url = os.getenv("BACKEND_URL", "https://fontap-backend-production.up.railway.app")
+    session = stripe.checkout.Session.create(
+        mode="payment",
+        payment_method_types=["card"],
+        line_items=[{
+            "price_data": {
+                "currency": "eur",
+                "product_data": {"name": f"FonTap — {servicio.tipo}"},
+                "unit_amount": int(servicio.precio * 100),
+            },
+            "quantity": 1,
+        }],
+        metadata={"servicio_id": str(servicio_id)},
+        success_url=f"{base_url}/pago-resultado?estado=ok",
+        cancel_url=f"{base_url}/pago-resultado?estado=cancelado",
+    )
+    servicio.stripe_payment_intent = session.id
+    db.commit()
+    return {"checkout_url": session.url, "session_id": session.id}
+
+@app.post("/servicios/{servicio_id}/stripe/verificar")
+def verificar_stripe_checkout(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """El frontend llama esto al volver del navegador de pago; verificamos directo
+    con Stripe (nunca confiamos en que el cliente 'diga' que pagó)."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=501, detail="Stripe no configurado.")
+    import stripe
+    stripe.api_key = STRIPE_SECRET_KEY
+
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio or not servicio.stripe_payment_intent:
+        raise HTTPException(status_code=400, detail="No hay sesión de pago para este servicio")
+
+    session = stripe.checkout.Session.retrieve(servicio.stripe_payment_intent)
+    ya_pagado = servicio.estado == "pagado"
+    if session.payment_status == "paid" and not ya_pagado:
+        servicio.estado = "pagado"
+        servicio.metodo_pago = "stripe"
+        comision = round((servicio.precio or 0) * 0.05, 2)
+        servicio.comision_aplicada = comision
+        if servicio.fontanero_id:
+            fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
+            if fontanero_obj and fontanero_obj.usuario_id:
+                _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido", f"Pago de {servicio.precio}€ confirmado por Stripe", "pago_recibido", servicio_id)
+        db.commit()
+    return {"pagado": session.payment_status == "paid"}
+
+@app.get("/pago-resultado")
+def pago_resultado(estado: str = "ok"):
+    from fastapi.responses import HTMLResponse
+    if estado == "ok":
+        titulo, texto = "✅ Pago completado", "Ya puedes cerrar esta ventana y volver a la app FonTap."
+    else:
+        titulo, texto = "Pago cancelado", "Puedes volver a la app FonTap e intentarlo de nuevo."
+    html = f"""<html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>body{{font-family:-apple-system,sans-serif;text-align:center;padding:60px 24px;background:#0A1A2A;color:#fff}}
+    h1{{font-size:22px}} p{{color:#9AA6B8}}</style></head>
+    <body><h1>{titulo}</h1><p>{texto}</p></body></html>"""
+    return HTMLResponse(html)
 
 # ─── BIZUM ────────────────────────────────────────────────────────────────────
 
