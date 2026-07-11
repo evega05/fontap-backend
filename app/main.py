@@ -10,7 +10,9 @@ from .database import engine, get_db
 import os, uuid, requests as _http, secrets, smtplib, datetime
 from email.mime.text import MIMEText
 
-UPLOAD_DIR = "uploads"
+# En Railway el disco es efímero: montar un Volume y apuntar UPLOAD_DIR ahí
+# (p. ej. UPLOAD_DIR=/data/uploads) para que las fotos sobrevivan a los redeploys.
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 SMTP_HOST = os.getenv("SMTP_HOST", "")
@@ -214,11 +216,42 @@ def registrar_usuario(usuario: schemas.UsuarioRegistro, db: Session = Depends(ge
         "email": nuevo.email,
     }
 
+# Protección contra fuerza bruta: tras varios fallos seguidos con un mismo email,
+# se bloquea temporalmente el login de ese email. En memoria (se reinicia con el proceso).
+MAX_INTENTOS_LOGIN = 5
+BLOQUEO_LOGIN_MINUTOS = 15
+_intentos_login = {}  # email -> {"fallos": int, "bloqueado_hasta": datetime | None}
+
+def _login_bloqueado(email: str):
+    registro = _intentos_login.get(email)
+    if not registro or not registro.get("bloqueado_hasta"):
+        return None
+    restante = registro["bloqueado_hasta"] - datetime.datetime.utcnow()
+    if restante.total_seconds() <= 0:
+        _intentos_login.pop(email, None)
+        return None
+    return int(restante.total_seconds() // 60) + 1
+
+def _registrar_fallo_login(email: str):
+    registro = _intentos_login.setdefault(email, {"fallos": 0, "bloqueado_hasta": None})
+    registro["fallos"] += 1
+    if registro["fallos"] >= MAX_INTENTOS_LOGIN:
+        registro["bloqueado_hasta"] = datetime.datetime.utcnow() + datetime.timedelta(minutes=BLOQUEO_LOGIN_MINUTOS)
+
 @app.post("/login", response_model=schemas.Token)
 def login(datos: schemas.UsuarioLogin, db: Session = Depends(get_db)):
+    email_normalizado = datos.email.strip().lower()
+    minutos = _login_bloqueado(email_normalizado)
+    if minutos:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Demasiados intentos fallidos. Inténtalo de nuevo en {minutos} min",
+        )
     usuario = db.query(models.Usuario).filter(models.Usuario.email == datos.email).first()
     if not usuario or not auth.verificar_password(datos.password, usuario.password_hash):
+        _registrar_fallo_login(email_normalizado)
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
+    _intentos_login.pop(email_normalizado, None)
     token = auth.crear_token({"sub": usuario.email, "tipo": usuario.tipo, "id": usuario.id})
     return {
         "access_token": token,
@@ -395,6 +428,123 @@ def login_google(datos: GoogleAuthDatos, db: Session = Depends(get_db)):
         "id": usuario.id,
         "email": usuario.email,
     }
+
+# ─── MI CUENTA ─────────────────────────────────────────────────────────────────
+
+@app.get("/usuarios/{usuario_id}/perfil")
+def ver_perfil_usuario(
+    usuario_id: int,
+    current_user: dict = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user["id"] != usuario_id:
+        raise HTTPException(status_code=403, detail="No puedes ver otra cuenta")
+    usuario = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    return {
+        "nombre": usuario.nombre,
+        "email": usuario.email,
+        "telefono": usuario.telefono or "",
+        "tipo": usuario.tipo,
+        "email_verificado": usuario.email_verificado,
+    }
+
+class PerfilUsuarioDatos(BaseModel):
+    nombre: Optional[str] = None
+    telefono: Optional[str] = None
+
+@app.put("/usuarios/{usuario_id}/perfil")
+def actualizar_perfil_usuario(
+    usuario_id: int,
+    datos: PerfilUsuarioDatos,
+    current_user: dict = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user["id"] != usuario_id:
+        raise HTTPException(status_code=403, detail="No puedes editar otra cuenta")
+    usuario = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    if datos.nombre is not None:
+        nombre = datos.nombre.strip()
+        if not nombre:
+            raise HTTPException(status_code=400, detail="El nombre no puede estar vacío")
+        usuario.nombre = nombre
+    if datos.telefono is not None:
+        usuario.telefono = datos.telefono.strip()
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == usuario_id).first()
+    if fontanero:
+        if datos.nombre is not None:
+            fontanero.nombre = usuario.nombre
+        if datos.telefono is not None:
+            fontanero.telefono = usuario.telefono
+    db.commit()
+    return {"mensaje": "Perfil actualizado", "nombre": usuario.nombre, "telefono": usuario.telefono}
+
+class CambiarPasswordDatos(BaseModel):
+    password_actual: str
+    password_nueva: str
+
+@app.put("/usuarios/{usuario_id}/password")
+def cambiar_password(
+    usuario_id: int,
+    datos: CambiarPasswordDatos,
+    current_user: dict = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user["id"] != usuario_id:
+        raise HTTPException(status_code=403, detail="No puedes cambiar la contraseña de otra cuenta")
+    usuario = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    # 400 y no 401: el 401 con token adjunto lo interpreta la app como sesión caducada
+    if not auth.verificar_password(datos.password_actual, usuario.password_hash):
+        raise HTTPException(status_code=400, detail="La contraseña actual no es correcta")
+    if len(datos.password_nueva) < 6:
+        raise HTTPException(status_code=400, detail="La nueva contraseña debe tener al menos 6 caracteres")
+    usuario.password_hash = auth.hashear_password(datos.password_nueva)
+    db.commit()
+    return {"mensaje": "Contraseña actualizada"}
+
+@app.delete("/usuarios/{usuario_id}")
+def eliminar_cuenta(
+    usuario_id: int,
+    current_user: dict = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Elimina la cuenta propia: borra los datos personales y anonimiza el historial
+    (los servicios y reseñas se conservan sin datos identificativos, RGPD)."""
+    if current_user["id"] != usuario_id:
+        raise HTTPException(status_code=403, detail="No puedes eliminar otra cuenta")
+    usuario = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    db.query(models.TokenPush).filter(models.TokenPush.usuario_id == usuario_id).delete()
+    db.query(models.Notificacion).filter(models.Notificacion.usuario_id == usuario_id).delete()
+    db.query(models.Favorito).filter(models.Favorito.cliente_id == usuario_id).delete()
+    db.query(models.VerificacionEmail).filter(models.VerificacionEmail.usuario_id == usuario_id).delete()
+    db.query(models.PasswordReset).filter(models.PasswordReset.usuario_id == usuario_id).delete()
+
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == usuario_id).first()
+    if fontanero:
+        fontanero.nombre = "Fontanero eliminado"
+        fontanero.telefono = ""
+        fontanero.disponible = False
+        fontanero.disponible_24h = False
+        fontanero.foto_url = None
+        fontanero.descripcion = None
+        fontanero.latitud = None
+        fontanero.longitud = None
+
+    usuario.nombre = "Usuario eliminado"
+    usuario.email = f"eliminado-{usuario_id}-{secrets.token_hex(4)}@cuenta-eliminada.fontap"
+    usuario.telefono = ""
+    usuario.password_hash = auth.hashear_password(secrets.token_hex(16))
+    usuario.email_verificado = False
+    db.commit()
+    return {"mensaje": "Cuenta eliminada"}
 
 # ─── FONTANEROS ────────────────────────────────────────────────────────────────
 
