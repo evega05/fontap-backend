@@ -16,6 +16,8 @@ class Usuario(Base):
     tipo = Column(String, default="cliente")  # cliente, fontanero, admin, administrador_fincas
     terminos_aceptados = Column(Boolean, default=False)
     email_verificado = Column(Boolean, default=False)
+    telefono_verificado = Column(Boolean, default=False)
+    bloqueado = Column(Boolean, default=False)
     creado_en = Column(DateTime, default=utcnow)
 
 class Fontanero(Base):
@@ -174,6 +176,16 @@ class ResenaCliente(Base):
     comentario = Column(Text, nullable=True)
     creado_en = Column(DateTime, default=utcnow)
 
+class VerificacionSMS(Base):
+    __tablename__ = "verificaciones_sms"
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    codigo = Column(String, index=True)
+    telefono = Column(String)
+    expira = Column(DateTime)
+    usado = Column(Boolean, default=False)
+    creado_en = Column(DateTime, default=utcnow)
+
 class VerificacionEmail(Base):
     __tablename__ = "verificaciones_email"
     id = Column(Integer, primary_key=True, index=True)
@@ -200,6 +212,8 @@ class Cita(Base):
     titulo = Column(String)
     fecha_inicio = Column(DateTime)
     fecha_fin = Column(DateTime)
+    recordatorio_24h = Column(Boolean, default=False)
+    recordatorio_1h = Column(Boolean, default=False)
     creado_en = Column(DateTime, default=utcnow)
 
 class Inmueble(Base):
