@@ -416,78 +416,6 @@ def reenviar_verificacion(datos: ReenviarVerificacionDatos, db: Session = Depend
         _enviar_email_verificacion(usuario.email, token)
     return {"mensaje": "Si el email existe y no está verificado, se envió un nuevo código"}
 
-# ─── VERIFICACIÓN DE TELÉFONO POR SMS ─────────────────────────────────────────
-# Sin credenciales de Twilio configuradas, el código se imprime en el log del
-# servidor (igual que el email sin SMTP). Con TWILIO_SID/TWILIO_TOKEN/TWILIO_FROM
-# definidos en el entorno, se envía un SMS real.
-
-TWILIO_SID = os.getenv("TWILIO_SID", "")
-TWILIO_TOKEN = os.getenv("TWILIO_TOKEN", "")
-TWILIO_FROM = os.getenv("TWILIO_FROM", "")
-
-def _enviar_sms(telefono: str, mensaje: str, codigo: str):
-    if not TWILIO_SID:
-        print(f"[verificar-sms] Twilio no configurado. Código para {telefono}: {codigo}")
-        return
-    try:
-        _http.post(
-            f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Messages.json",
-            data={"To": telefono, "From": TWILIO_FROM, "Body": mensaje},
-            auth=(TWILIO_SID, TWILIO_TOKEN),
-            timeout=8,
-        )
-    except Exception as e:
-        print(f"[verificar-sms] Error enviando SMS a {telefono}: {e}")
-
-class EnviarSMSDatos(BaseModel):
-    telefono: Optional[str] = None
-
-@app.post("/auth/enviar-sms")
-def enviar_sms_verificacion(
-    datos: EnviarSMSDatos,
-    current_user: dict = Depends(auth.get_current_user),
-    db: Session = Depends(get_db),
-):
-    usuario = db.query(models.Usuario).filter(models.Usuario.id == current_user["id"]).first()
-    if not usuario:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    telefono = (datos.telefono or usuario.telefono or "").strip()
-    if not telefono:
-        raise HTTPException(status_code=400, detail="No hay teléfono en tu cuenta. Añádelo primero en Mi cuenta")
-    codigo = str(secrets.randbelow(900000) + 100000)  # 6 dígitos
-    db.add(models.VerificacionSMS(
-        usuario_id=usuario.id, codigo=codigo, telefono=telefono,
-        expira=datetime.datetime.utcnow() + datetime.timedelta(minutes=10),
-    ))
-    db.commit()
-    _enviar_sms(telefono, f"Tu código de verificación de Multiservicios Provenza es: {codigo}", codigo)
-    return {"mensaje": "Código enviado por SMS", "telefono": telefono}
-
-class VerificarSMSDatos(BaseModel):
-    codigo: str
-
-@app.post("/auth/verificar-sms")
-def verificar_sms(
-    datos: VerificarSMSDatos,
-    current_user: dict = Depends(auth.get_current_user),
-    db: Session = Depends(get_db),
-):
-    usuario = db.query(models.Usuario).filter(models.Usuario.id == current_user["id"]).first()
-    if not usuario:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    verificacion = db.query(models.VerificacionSMS).filter(
-        models.VerificacionSMS.usuario_id == usuario.id,
-        models.VerificacionSMS.codigo == datos.codigo.strip(),
-        models.VerificacionSMS.usado == False,
-    ).order_by(models.VerificacionSMS.id.desc()).first()
-    if not verificacion or verificacion.expira < datetime.datetime.utcnow():
-        raise HTTPException(status_code=400, detail="Código inválido o caducado")
-    usuario.telefono_verificado = True
-    usuario.telefono = verificacion.telefono
-    verificacion.usado = True
-    db.commit()
-    return {"mensaje": "Teléfono verificado"}
-
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 
 class GoogleAuthDatos(BaseModel):
@@ -561,7 +489,6 @@ def ver_perfil_usuario(
         "telefono": usuario.telefono or "",
         "tipo": usuario.tipo,
         "email_verificado": usuario.email_verificado,
-        "telefono_verificado": bool(usuario.telefono_verificado),
     }
 
 class PerfilUsuarioDatos(BaseModel):
