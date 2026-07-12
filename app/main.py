@@ -12,6 +12,12 @@ from email.mime.text import MIMEText
 
 # En Railway el disco es efímero: montar un Volume y apuntar UPLOAD_DIR ahí
 # (p. ej. UPLOAD_DIR=/data/uploads) para que las fotos sobrevivan a los redeploys.
+GREMIOS_VALIDOS = [
+    "fontanero", "electricista", "cerrajero", "pintor", "carpintero",
+    "albanil", "climatizacion", "jardinero", "limpieza", "mudanzas",
+    "montador", "cristalero",
+]
+
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -140,7 +146,7 @@ def get_or_create_fontanero(db: Session, usuario_id: int, gremio: str = "fontane
             disponible=True,
             disponible_24h=False,
             zona="Bilbao",
-            gremio=gremio if gremio in ["fontanero", "electricista", "cerrajero", "pintor"] else "fontanero",
+            gremio=gremio if gremio in GREMIOS_VALIDOS else "fontanero",
         )
         db.add(fontanero)
         db.commit()

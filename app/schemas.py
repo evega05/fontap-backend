@@ -17,7 +17,11 @@ class UsuarioRegistro(BaseModel):
     password: str
     tipo: Literal["cliente", "fontanero", "administrador_fincas"] = "cliente"
     terminos_aceptados: bool = False
-    gremio: Literal["fontanero", "electricista", "cerrajero", "pintor"] = "fontanero"
+    gremio: Literal[
+        "fontanero", "electricista", "cerrajero", "pintor", "carpintero",
+        "albanil", "climatizacion", "jardinero", "limpieza", "mudanzas",
+        "montador", "cristalero",
+    ] = "fontanero"
 
 class UsuarioLogin(BaseModel):
     email: EmailStr
