@@ -17,6 +17,7 @@ class UsuarioRegistro(BaseModel):
     password: str
     tipo: Literal["cliente", "fontanero", "administrador_fincas"] = "cliente"
     terminos_aceptados: bool = False
+    gremio: Literal["fontanero", "electricista", "cerrajero", "pintor"] = "fontanero"
 
 class UsuarioLogin(BaseModel):
     email: EmailStr
@@ -28,6 +29,10 @@ class UsuarioRespuesta(BaseModel):
     email: str
     telefono: str
     tipo: str
+    email_verificado: Optional[bool] = False
+    telefono_verificado: Optional[bool] = False
+    bloqueado: Optional[bool] = False
+    creado_en: Optional[datetime.datetime] = None
     class Config:
         from_attributes = True
 
@@ -97,6 +102,7 @@ class ServicioCrear(BaseModel):
 ESTADO_COLORES = {
     "pendiente": "#D97706",
     "aceptado": "#0A7A3E",
+    "en_camino": "#1A56DB",
     "rechazado": "#C8271A",
     "pagado": "#0A7A3E",
     "precio_enviado": "#1A56DB",
@@ -337,3 +343,9 @@ class AdminStats(BaseModel):
     servicios_pendientes: int
     servicios_completados: int
     ingresos_plataforma: float
+    dinero_movido: float = 0
+    comisiones_pendientes: float = 0
+    usuarios_nuevos_7d: int = 0
+    servicios_7d: int = 0
+    usuarios_bloqueados: int = 0
+    por_gremio: Optional[dict] = None
