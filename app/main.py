@@ -18,6 +18,10 @@ GREMIOS_VALIDOS = [
     "montador", "cristalero",
 ]
 
+# Como Habitissimo: máximo de profesionales que pueden ofertar por un mismo
+# servicio abierto, para no saturar al cliente con demasiadas propuestas.
+CUPO_MAXIMO_OFERTAS = 4
+
 def _norm_email(email: str) -> str:
     """Un email dado por el usuario (registro, login, reset...) se compara siempre
     en minúsculas y sin espacios, para que un teclado que capitaliza la primera
@@ -61,6 +65,10 @@ def _migrar_columnas_faltantes():
         "citas": {
             "recordatorio_24h": "BOOLEAN DEFAULT FALSE",
             "recordatorio_1h": "BOOLEAN DEFAULT FALSE",
+        },
+        "ofertas": {
+            "materiales": "FLOAT",
+            "mano_obra": "FLOAT",
         },
     }
     with engine.begin() as conn:
@@ -701,11 +709,66 @@ def actualizar_disponibilidad(
     ).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    pasa_a_disponible = datos.disponible and not fontanero.disponible
     fontanero.disponible = datos.disponible
     if datos.disponible_24h is not None:
         fontanero.disponible_24h = datos.disponible_24h
     db.commit()
+
+    if pasa_a_disponible:
+        espera = db.query(models.ListaEspera).filter(models.ListaEspera.gremio == fontanero.gremio).all()
+        for e in espera:
+            _crear_notificacion(db, e.cliente_id, "¡Hay alguien libre!",
+                                 f"Un profesional de {fontanero.gremio} ya está disponible", "lista_espera", fontanero.id)
+            db.delete(e)
+        if espera:
+            db.commit()
+
     return {"mensaje": "Disponibilidad actualizada"}
+
+# ─── LISTA DE ESPERA ────────────────────────────────────────────────────────────
+
+@app.post("/lista-espera", response_model=schemas.ListaEsperaRespuesta)
+def apuntarse_lista_espera(
+    datos: schemas.ListaEsperaCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    if datos.gremio not in GREMIOS_VALIDOS:
+        raise HTTPException(status_code=422, detail="Gremio no válido")
+    existente = db.query(models.ListaEspera).filter(
+        models.ListaEspera.cliente_id == current_user["id"],
+        models.ListaEspera.gremio == datos.gremio,
+    ).first()
+    if existente:
+        return existente
+    entrada = models.ListaEspera(cliente_id=current_user["id"], gremio=datos.gremio)
+    db.add(entrada)
+    db.commit()
+    db.refresh(entrada)
+    return entrada
+
+@app.get("/lista-espera", response_model=List[schemas.ListaEsperaRespuesta])
+def ver_lista_espera(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    return db.query(models.ListaEspera).filter(
+        models.ListaEspera.cliente_id == current_user["id"]
+    ).all()
+
+@app.delete("/lista-espera/{gremio}")
+def salir_lista_espera(
+    gremio: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    db.query(models.ListaEspera).filter(
+        models.ListaEspera.cliente_id == current_user["id"],
+        models.ListaEspera.gremio == gremio,
+    ).delete()
+    db.commit()
+    return {"mensaje": "Has salido de la lista de espera"}
 
 @app.put("/fontaneros/{fontanero_id}/ubicacion")
 def actualizar_ubicacion(
@@ -818,7 +881,15 @@ def listar_servicios_abiertos(
     if gremio:
         query = query.filter(models.Servicio.gremio == gremio)
     servicios = query.order_by(models.Servicio.id.desc()).all()
-    return [schemas.ServicioRespuesta.from_orm_with_color(s) for s in servicios]
+    resultado = []
+    for s in servicios:
+        data = schemas.ServicioRespuesta.from_orm_with_color(s)
+        data.num_ofertas = db.query(models.Oferta).filter(
+            models.Oferta.servicio_id == s.id,
+            models.Oferta.estado == "pendiente",
+        ).count()
+        resultado.append(data)
+    return resultado
 
 @app.get("/servicios/{servicio_id}")
 def ver_servicio(
@@ -1710,19 +1781,41 @@ def crear_oferta(
     ).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+
+    if datos.materiales is not None and datos.mano_obra is not None:
+        precio_final = datos.materiales + datos.mano_obra
+    elif datos.precio is not None:
+        precio_final = datos.precio
+    else:
+        raise HTTPException(status_code=422, detail="Falta el precio, o el desglose de materiales y mano de obra")
+
     existente = db.query(models.Oferta).filter(
         models.Oferta.servicio_id == servicio_id,
         models.Oferta.fontanero_id == fontanero.id,
     ).first()
     if existente:
-        existente.precio = datos.precio
+        existente.precio = precio_final
+        existente.materiales = datos.materiales
+        existente.mano_obra = datos.mano_obra
         existente.mensaje = datos.mensaje
         db.commit()
         db.refresh(existente)
         return existente
-    oferta = models.Oferta(servicio_id=servicio_id, fontanero_id=fontanero.id, precio=datos.precio, mensaje=datos.mensaje)
+
+    ofertas_activas = db.query(models.Oferta).filter(
+        models.Oferta.servicio_id == servicio_id,
+        models.Oferta.estado == "pendiente",
+    ).count()
+    if ofertas_activas >= CUPO_MAXIMO_OFERTAS:
+        raise HTTPException(status_code=409, detail="Ya hay suficientes profesionales interesados en este servicio")
+
+    oferta = models.Oferta(
+        servicio_id=servicio_id, fontanero_id=fontanero.id,
+        precio=precio_final, materiales=datos.materiales, mano_obra=datos.mano_obra,
+        mensaje=datos.mensaje,
+    )
     db.add(oferta)
-    _crear_notificacion(db, servicio.cliente_id, "Nueva oferta recibida", f"Un profesional ofrece realizar el servicio por {datos.precio}€", "oferta", servicio_id)
+    _crear_notificacion(db, servicio.cliente_id, "Nueva oferta recibida", f"Un profesional ofrece realizar el servicio por {precio_final}€", "oferta", servicio_id)
     db.commit()
     db.refresh(oferta)
     return oferta

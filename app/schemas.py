@@ -238,7 +238,9 @@ class FavoritoRespuesta(BaseModel):
         from_attributes = True
 
 class OfertaCrear(BaseModel):
-    precio: float
+    precio: Optional[float] = None
+    materiales: Optional[float] = None
+    mano_obra: Optional[float] = None
     mensaje: Optional[str] = None
 
 class OfertaRespuesta(BaseModel):
@@ -246,6 +248,8 @@ class OfertaRespuesta(BaseModel):
     servicio_id: int
     fontanero_id: int
     precio: float
+    materiales: Optional[float] = None
+    mano_obra: Optional[float] = None
     mensaje: Optional[str] = None
     estado: str
     creado_en: datetime.datetime
@@ -255,6 +259,17 @@ class OfertaRespuesta(BaseModel):
     fontanero_trabajos: Optional[int] = None
     tipo: Optional[str] = None
     zona: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class ListaEsperaCrear(BaseModel):
+    gremio: str
+
+class ListaEsperaRespuesta(BaseModel):
+    id: int
+    cliente_id: int
+    gremio: str
+    creado_en: datetime.datetime
     class Config:
         from_attributes = True
 

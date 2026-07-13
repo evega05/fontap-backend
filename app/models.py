@@ -148,8 +148,17 @@ class Oferta(Base):
     servicio_id = Column(Integer, ForeignKey("servicios.id"))
     fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
     precio = Column(Float)
+    materiales = Column(Float, nullable=True)
+    mano_obra = Column(Float, nullable=True)
     mensaje = Column(Text, nullable=True)
     estado = Column(String, default="pendiente")  # pendiente, aceptada, rechazada
+    creado_en = Column(DateTime, default=utcnow)
+
+class ListaEspera(Base):
+    __tablename__ = "lista_espera"
+    id = Column(Integer, primary_key=True, index=True)
+    cliente_id = Column(Integer, ForeignKey("usuarios.id"))
+    gremio = Column(String)
     creado_en = Column(DateTime, default=utcnow)
 
 class Resena(Base):
