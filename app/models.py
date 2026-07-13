@@ -53,6 +53,7 @@ class Servicio(Base):
     descripcion = Column(Text, nullable=True)
     urgente = Column(Boolean, default=False)
     urgencia_ia = Column(String, nullable=True)  # baja, media, alta, critica
+    gremio = Column(String, nullable=True)  # ver GREMIOS_VALIDOS en main.py
     estado = Column(String, default="pendiente")
     precio = Column(Float, nullable=True)
     metodo_pago = Column(String, nullable=True)
