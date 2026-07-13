@@ -300,6 +300,42 @@ class ServicioRecurrenteRespuesta(BaseModel):
     class Config:
         from_attributes = True
 
+class ProyectoCrear(BaseModel):
+    titulo: str
+    descripcion: Optional[str] = None
+    gremios: List[str]
+    ciudad: str = "Bilbao"
+
+class ProyectoRespuesta(BaseModel):
+    id: int
+    administrador_id: int
+    titulo: str
+    descripcion: Optional[str] = None
+    gremios: str
+    ciudad: str
+    estado: str
+    creado_en: datetime.datetime
+    num_interesados: int = 0
+    class Config:
+        from_attributes = True
+
+class ProyectoActualizar(BaseModel):
+    estado: Optional[Literal["abierto", "cerrado"]] = None
+
+class ProyectoInteresCrear(BaseModel):
+    mensaje: Optional[str] = None
+
+class ProyectoInteresRespuesta(BaseModel):
+    id: int
+    proyecto_id: int
+    fontanero_id: int
+    mensaje: Optional[str] = None
+    creado_en: datetime.datetime
+    fontanero_nombre: Optional[str] = None
+    fontanero_valoracion: Optional[float] = None
+    class Config:
+        from_attributes = True
+
 class ResenaCrear(BaseModel):
     puntualidad: float
     calidad: float

@@ -249,6 +249,25 @@ class ServicioRecurrente(Base):
     activo = Column(Boolean, default=True)
     creado_en = Column(DateTime, default=utcnow)
 
+class Proyecto(Base):
+    __tablename__ = "proyectos"
+    id = Column(Integer, primary_key=True, index=True)
+    administrador_id = Column(Integer, ForeignKey("usuarios.id"))
+    titulo = Column(String)
+    descripcion = Column(Text, nullable=True)
+    gremios = Column(String)  # coma-separada, ej. "electricista,fontanero,pintor"
+    ciudad = Column(String, default="Bilbao")
+    estado = Column(String, default="abierto")  # abierto, cerrado
+    creado_en = Column(DateTime, default=utcnow)
+
+class ProyectoInteres(Base):
+    __tablename__ = "proyectos_interes"
+    id = Column(Integer, primary_key=True, index=True)
+    proyecto_id = Column(Integer, ForeignKey("proyectos.id"))
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    mensaje = Column(Text, nullable=True)
+    creado_en = Column(DateTime, default=utcnow)
+
 class DocumentoVerificacion(Base):
     __tablename__ = "documentos_verificacion"
     id = Column(Integer, primary_key=True, index=True)

@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, nullslast, inspect, text
+from sqlalchemy import or_, nullslast, inspect, text, func
 from typing import List, Optional
 from pydantic import BaseModel
 from . import models, schemas, auth
@@ -661,7 +661,7 @@ def eliminar_cuenta(
 # ─── FONTANEROS ────────────────────────────────────────────────────────────────
 
 @app.get("/fontaneros", response_model=List[schemas.FontaneroRespuesta])
-def listar_fontaneros(gremio: Optional[str] = None, db: Session = Depends(get_db)):
+def listar_fontaneros(gremio: Optional[str] = None, ciudad: Optional[str] = None, db: Session = Depends(get_db)):
     # Excluye profesionales cuyo usuario esté vetado por el admin
     query = db.query(models.Fontanero).outerjoin(
         models.Usuario, models.Fontanero.usuario_id == models.Usuario.id
@@ -671,9 +671,10 @@ def listar_fontaneros(gremio: Optional[str] = None, db: Session = Depends(get_db
     )
     if gremio:
         query = query.filter(models.Fontanero.gremio == gremio)
+    if ciudad:
+        query = query.filter(func.lower(models.Fontanero.zona) == ciudad.lower())
     fontaneros = query.all()
 
-    from sqlalchemy import func
     precios_min = dict(
         db.query(models.ServicioFontanero.fontanero_id, func.min(models.ServicioFontanero.precio))
         .filter(models.ServicioFontanero.activo == True)
@@ -967,6 +968,137 @@ def eliminar_servicio_recurrente(
     ).delete()
     db.commit()
     return {"mensaje": "Servicio recurrente cancelado"}
+
+# ─── PROYECTOS (TABLÓN B2B) ─────────────────────────────────────────────────────
+# Trabajos grandes (reformas, comunidades de vecinos...) que abarcan varios
+# gremios a la vez. Los publica un administrador de fincas y los profesionales
+# de los gremios implicados pueden apuntarse.
+
+def _proyecto_con_interesados(db: Session, proyecto: models.Proyecto) -> schemas.ProyectoRespuesta:
+    data = schemas.ProyectoRespuesta.model_validate(proyecto)
+    data.num_interesados = db.query(models.ProyectoInteres).filter(
+        models.ProyectoInteres.proyecto_id == proyecto.id
+    ).count()
+    return data
+
+@app.post("/proyectos", response_model=schemas.ProyectoRespuesta)
+def crear_proyecto(
+    datos: schemas.ProyectoCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    if current_user["tipo"] != "administrador_fincas":
+        raise HTTPException(status_code=403, detail="Solo un administrador de fincas puede publicar proyectos")
+    gremios_validos = [g for g in datos.gremios if g in GREMIOS_VALIDOS]
+    if not gremios_validos:
+        raise HTTPException(status_code=422, detail="Indica al menos un gremio válido")
+    proyecto = models.Proyecto(
+        administrador_id=current_user["id"],
+        titulo=datos.titulo,
+        descripcion=datos.descripcion,
+        gremios=",".join(gremios_validos),
+        ciudad=datos.ciudad,
+    )
+    db.add(proyecto)
+    db.commit()
+    db.refresh(proyecto)
+    return _proyecto_con_interesados(db, proyecto)
+
+@app.get("/proyectos", response_model=List[schemas.ProyectoRespuesta])
+def listar_proyectos(
+    gremio: Optional[str] = None,
+    ciudad: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    query = db.query(models.Proyecto).filter(models.Proyecto.estado == "abierto")
+    if gremio:
+        query = query.filter(models.Proyecto.gremios.like(f"%{gremio}%"))
+    if ciudad:
+        query = query.filter(func.lower(models.Proyecto.ciudad) == ciudad.lower())
+    proyectos = query.order_by(models.Proyecto.id.desc()).all()
+    return [_proyecto_con_interesados(db, p) for p in proyectos]
+
+@app.get("/proyectos/mios", response_model=List[schemas.ProyectoRespuesta])
+def listar_mis_proyectos(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    proyectos = db.query(models.Proyecto).filter(
+        models.Proyecto.administrador_id == current_user["id"]
+    ).order_by(models.Proyecto.id.desc()).all()
+    return [_proyecto_con_interesados(db, p) for p in proyectos]
+
+@app.put("/proyectos/{proyecto_id}", response_model=schemas.ProyectoRespuesta)
+def actualizar_proyecto(
+    proyecto_id: int,
+    datos: schemas.ProyectoActualizar,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    proyecto = db.query(models.Proyecto).filter(
+        models.Proyecto.id == proyecto_id,
+        models.Proyecto.administrador_id == current_user["id"],
+    ).first()
+    if not proyecto:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+    if datos.estado is not None:
+        proyecto.estado = datos.estado
+    db.commit()
+    db.refresh(proyecto)
+    return _proyecto_con_interesados(db, proyecto)
+
+@app.post("/proyectos/{proyecto_id}/interes", response_model=schemas.ProyectoInteresRespuesta)
+def expresar_interes_proyecto(
+    proyecto_id: int,
+    datos: schemas.ProyectoInteresCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    proyecto = db.query(models.Proyecto).filter(models.Proyecto.id == proyecto_id).first()
+    if not proyecto:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    existente = db.query(models.ProyectoInteres).filter(
+        models.ProyectoInteres.proyecto_id == proyecto_id,
+        models.ProyectoInteres.fontanero_id == fontanero.id,
+    ).first()
+    if existente:
+        return existente
+    interes = models.ProyectoInteres(proyecto_id=proyecto_id, fontanero_id=fontanero.id, mensaje=datos.mensaje)
+    db.add(interes)
+    _crear_notificacion(db, proyecto.administrador_id, "Nuevo interesado en tu proyecto",
+                         f"{fontanero.nombre} está interesado en \"{proyecto.titulo}\"", "proyecto_interes", proyecto_id)
+    db.commit()
+    db.refresh(interes)
+    return interes
+
+@app.get("/proyectos/{proyecto_id}/interesados", response_model=List[schemas.ProyectoInteresRespuesta])
+def listar_interesados_proyecto(
+    proyecto_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    proyecto = db.query(models.Proyecto).filter(
+        models.Proyecto.id == proyecto_id,
+        models.Proyecto.administrador_id == current_user["id"],
+    ).first()
+    if not proyecto:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+    interesados = db.query(models.ProyectoInteres).filter(
+        models.ProyectoInteres.proyecto_id == proyecto_id
+    ).all()
+    resultado = []
+    for i in interesados:
+        data = schemas.ProyectoInteresRespuesta.model_validate(i)
+        fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == i.fontanero_id).first()
+        if fontanero:
+            data.fontanero_nombre = fontanero.nombre
+            data.fontanero_valoracion = fontanero.valoracion
+        resultado.append(data)
+    return resultado
 
 @app.get("/servicios/{servicio_id}")
 def ver_servicio(
