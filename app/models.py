@@ -112,6 +112,7 @@ class Mensaje(Base):
     servicio_id = Column(Integer, ForeignKey("servicios.id"))
     emisor_id = Column(Integer, ForeignKey("usuarios.id"))
     texto = Column(Text)
+    imagen_url = Column(String, nullable=True)
     leido = Column(Boolean, default=False)
     creado_en = Column(DateTime, default=utcnow)
 
@@ -233,6 +234,19 @@ class Inmueble(Base):
     nombre = Column(String)
     direccion = Column(String)
     ciudad = Column(String, default="Bilbao")
+    creado_en = Column(DateTime, default=utcnow)
+
+class ServicioRecurrente(Base):
+    __tablename__ = "servicios_recurrentes"
+    id = Column(Integer, primary_key=True, index=True)
+    cliente_id = Column(Integer, ForeignKey("usuarios.id"))
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"), nullable=True)
+    gremio = Column(String)
+    tipo = Column(String)
+    descripcion = Column(Text, nullable=True)
+    frecuencia = Column(String)  # semanal, quincenal, mensual
+    proxima_ejecucion = Column(DateTime)
+    activo = Column(Boolean, default=True)
     creado_en = Column(DateTime, default=utcnow)
 
 class DocumentoVerificacion(Base):

@@ -70,6 +70,9 @@ def _migrar_columnas_faltantes():
             "materiales": "FLOAT",
             "mano_obra": "FLOAT",
         },
+        "mensajes": {
+            "imagen_url": "VARCHAR",
+        },
     }
     with engine.begin() as conn:
         for tabla, columnas_nuevas in por_tabla.items():
@@ -828,44 +831,49 @@ def ver_solicitudes_fontanero(
 
 # ─── SERVICIOS ─────────────────────────────────────────────────────────────────
 
-@app.post("/servicios", response_model=schemas.ServicioRespuesta)
-def crear_servicio(
-    servicio: schemas.ServicioCrear,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(auth.get_current_user),
-):
-    cliente_id = current_user["id"]
+def _crear_servicio_interno(db: Session, cliente_id: int, tipo: str, descripcion: Optional[str],
+                             urgente: bool, fecha, fontanero_id: Optional[int], gremio: Optional[str]):
     fontanero_directo = None
-    if servicio.fontanero_id:
-        fontanero_directo = db.query(models.Fontanero).filter(
-            models.Fontanero.id == servicio.fontanero_id
-        ).first()
+    if fontanero_id:
+        fontanero_directo = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
     nuevo = models.Servicio(
         cliente_id=cliente_id,
-        fontanero_id=servicio.fontanero_id,
-        tipo=servicio.tipo,
-        descripcion=servicio.descripcion,
-        urgente=servicio.urgente,
-        fecha=servicio.fecha,
+        fontanero_id=fontanero_id,
+        tipo=tipo,
+        descripcion=descripcion,
+        urgente=urgente,
+        fecha=fecha,
         estado="pendiente",
         precio=None,
-        gremio=fontanero_directo.gremio if fontanero_directo else servicio.gremio,
+        gremio=fontanero_directo.gremio if fontanero_directo else gremio,
     )
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
     if fontanero_directo:
-        _crear_notificacion(db, fontanero_directo.usuario_id, "Nueva solicitud", f"Tienes una nueva solicitud de {servicio.tipo}", "solicitud_directa", nuevo.id)
+        _crear_notificacion(db, fontanero_directo.usuario_id, "Nueva solicitud", f"Tienes una nueva solicitud de {tipo}", "solicitud_directa", nuevo.id)
         db.commit()
-    elif servicio.urgente:
+    elif urgente:
         fontaneros_zona = db.query(models.Fontanero).filter(
             models.Fontanero.disponible == True,
             models.Fontanero.usuario_id != None,
             models.Fontanero.gremio == nuevo.gremio,
         ).all()
         for f in fontaneros_zona:
-            _crear_notificacion(db, f.usuario_id, "Nueva solicitud urgente", f"Solicitud urgente de {servicio.tipo} cerca de tu zona", "solicitud_urgente", nuevo.id)
+            _crear_notificacion(db, f.usuario_id, "Nueva solicitud urgente", f"Solicitud urgente de {tipo} cerca de tu zona", "solicitud_urgente", nuevo.id)
         db.commit()
+    return nuevo
+
+@app.post("/servicios", response_model=schemas.ServicioRespuesta)
+def crear_servicio(
+    servicio: schemas.ServicioCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    nuevo = _crear_servicio_interno(
+        db, current_user["id"], servicio.tipo, servicio.descripcion,
+        servicio.urgente, servicio.fecha, servicio.fontanero_id, servicio.gremio,
+    )
     return schemas.ServicioRespuesta.from_orm_with_color(nuevo)
 
 @app.get("/servicios/abiertos", response_model=List[schemas.ServicioRespuesta])
@@ -890,6 +898,75 @@ def listar_servicios_abiertos(
         ).count()
         resultado.append(data)
     return resultado
+
+# ─── SERVICIOS RECURRENTES ──────────────────────────────────────────────────────
+
+FRECUENCIA_A_DIAS = {"semanal": 7, "quincenal": 14, "mensual": 30}
+
+@app.post("/servicios-recurrentes", response_model=schemas.ServicioRecurrenteRespuesta)
+def crear_servicio_recurrente(
+    datos: schemas.ServicioRecurrenteCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    if datos.gremio not in GREMIOS_VALIDOS:
+        raise HTTPException(status_code=422, detail="Gremio no válido")
+    plantilla = models.ServicioRecurrente(
+        cliente_id=current_user["id"],
+        fontanero_id=datos.fontanero_id,
+        gremio=datos.gremio,
+        tipo=datos.tipo,
+        descripcion=datos.descripcion,
+        frecuencia=datos.frecuencia,
+        proxima_ejecucion=datos.proxima_ejecucion,
+    )
+    db.add(plantilla)
+    db.commit()
+    db.refresh(plantilla)
+    return plantilla
+
+@app.get("/servicios-recurrentes", response_model=List[schemas.ServicioRecurrenteRespuesta])
+def listar_servicios_recurrentes(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    return db.query(models.ServicioRecurrente).filter(
+        models.ServicioRecurrente.cliente_id == current_user["id"]
+    ).order_by(models.ServicioRecurrente.id.desc()).all()
+
+@app.put("/servicios-recurrentes/{recurrente_id}", response_model=schemas.ServicioRecurrenteRespuesta)
+def actualizar_servicio_recurrente(
+    recurrente_id: int,
+    datos: schemas.ServicioRecurrenteActualizar,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    plantilla = db.query(models.ServicioRecurrente).filter(
+        models.ServicioRecurrente.id == recurrente_id,
+        models.ServicioRecurrente.cliente_id == current_user["id"],
+    ).first()
+    if not plantilla:
+        raise HTTPException(status_code=404, detail="Servicio recurrente no encontrado")
+    if datos.activo is not None:
+        plantilla.activo = datos.activo
+    if datos.frecuencia is not None:
+        plantilla.frecuencia = datos.frecuencia
+    db.commit()
+    db.refresh(plantilla)
+    return plantilla
+
+@app.delete("/servicios-recurrentes/{recurrente_id}")
+def eliminar_servicio_recurrente(
+    recurrente_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    db.query(models.ServicioRecurrente).filter(
+        models.ServicioRecurrente.id == recurrente_id,
+        models.ServicioRecurrente.cliente_id == current_user["id"],
+    ).delete()
+    db.commit()
+    return {"mensaje": "Servicio recurrente cancelado"}
 
 @app.get("/servicios/{servicio_id}")
 def ver_servicio(
@@ -2734,6 +2811,51 @@ def enviar_mensaje(
     return {
         "id": nuevo.id,
         "contenido": nuevo.texto,
+        "imagen_url": nuevo.imagen_url,
+        "remitente_tipo": emisor.tipo if emisor else "cliente",
+        "remitente_nombre": emisor.nombre if emisor else "Usuario",
+        "creado_en": str(nuevo.creado_en),
+    }
+
+@app.post("/servicios/{servicio_id}/mensajes/imagen")
+def enviar_mensaje_imagen(
+    servicio_id: int,
+    archivo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    if archivo.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
+    emisor_id = current_user["id"]
+    emisor = db.query(models.Usuario).filter(models.Usuario.id == emisor_id).first()
+    ext = archivo.filename.rsplit(".", 1)[-1] if "." in archivo.filename else "jpg"
+    nombre_archivo = f"{uuid.uuid4().hex}.{ext}"
+    ruta = os.path.join(UPLOAD_DIR, nombre_archivo)
+    with open(ruta, "wb") as f:
+        f.write(archivo.file.read())
+    nuevo = models.Mensaje(
+        servicio_id=servicio_id,
+        emisor_id=emisor_id,
+        texto="",
+        imagen_url=f"/uploads/{nombre_archivo}",
+        leido=False,
+    )
+    db.add(nuevo)
+    if emisor_id == servicio.cliente_id and servicio.fontanero_id:
+        fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
+        if fontanero_obj and fontanero_obj.usuario_id:
+            _crear_notificacion(db, fontanero_obj.usuario_id, "Nuevo mensaje", "📷 Foto", "mensaje", servicio_id)
+    elif servicio.cliente_id != emisor_id:
+        _crear_notificacion(db, servicio.cliente_id, "Nuevo mensaje", "📷 Foto", "mensaje", servicio_id)
+    db.commit()
+    db.refresh(nuevo)
+    return {
+        "id": nuevo.id,
+        "contenido": "",
+        "imagen_url": nuevo.imagen_url,
         "remitente_tipo": emisor.tipo if emisor else "cliente",
         "remitente_nombre": emisor.nombre if emisor else "Usuario",
         "creado_en": str(nuevo.creado_en),
@@ -2754,6 +2876,7 @@ def ver_mensajes(
         resultado.append({
             "id": m.id,
             "contenido": m.texto,
+            "imagen_url": m.imagen_url,
             "remitente_tipo": emisor.tipo if emisor else "cliente",
             "remitente_nombre": emisor.nombre if emisor else "Usuario",
             "creado_en": str(m.creado_en),
@@ -2863,3 +2986,37 @@ def _bucle_recordatorios():
 
 if os.getenv("DESACTIVAR_RECORDATORIOS", "") != "1":
     threading.Thread(target=_bucle_recordatorios, daemon=True).start()
+
+# ─── SERVICIOS RECURRENTES: CREACIÓN AUTOMÁTICA ────────────────────────────────
+# Hilo en segundo plano: cada 5 minutos revisa las plantillas activas y, cuando
+# toca, crea el Servicio real (misma ruta que una solicitud normal) y avanza la
+# fecha de la próxima ejecución según la frecuencia elegida.
+
+def _bucle_servicios_recurrentes():
+    from .database import SessionLocal
+    while True:
+        db = None
+        try:
+            db = SessionLocal()
+            ahora = datetime.datetime.utcnow()
+            pendientes = db.query(models.ServicioRecurrente).filter(
+                models.ServicioRecurrente.activo == True,
+                models.ServicioRecurrente.proxima_ejecucion <= ahora,
+            ).all()
+            for plantilla in pendientes:
+                _crear_servicio_interno(
+                    db, plantilla.cliente_id, plantilla.tipo, plantilla.descripcion,
+                    False, None, plantilla.fontanero_id, plantilla.gremio,
+                )
+                dias = FRECUENCIA_A_DIAS.get(plantilla.frecuencia, 30)
+                plantilla.proxima_ejecucion = plantilla.proxima_ejecucion + datetime.timedelta(days=dias)
+            db.commit()
+        except Exception as e:
+            print(f"[servicios-recurrentes] error: {e}")
+        finally:
+            if db is not None:
+                db.close()
+        _time.sleep(300)
+
+if os.getenv("DESACTIVAR_RECORDATORIOS", "") != "1":
+    threading.Thread(target=_bucle_servicios_recurrentes, daemon=True).start()

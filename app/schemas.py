@@ -208,6 +208,7 @@ class MensajeRespuesta(BaseModel):
     servicio_id: int
     emisor_id: int
     texto: str
+    imagen_url: Optional[str] = None
     leido: bool
     creado_en: datetime.datetime
     class Config:
@@ -269,6 +270,32 @@ class ListaEsperaRespuesta(BaseModel):
     id: int
     cliente_id: int
     gremio: str
+    creado_en: datetime.datetime
+    class Config:
+        from_attributes = True
+
+class ServicioRecurrenteCrear(BaseModel):
+    gremio: str
+    tipo: str
+    descripcion: Optional[str] = None
+    frecuencia: Literal["semanal", "quincenal", "mensual"]
+    fontanero_id: Optional[int] = None
+    proxima_ejecucion: datetime.datetime
+
+class ServicioRecurrenteActualizar(BaseModel):
+    activo: Optional[bool] = None
+    frecuencia: Optional[Literal["semanal", "quincenal", "mensual"]] = None
+
+class ServicioRecurrenteRespuesta(BaseModel):
+    id: int
+    cliente_id: int
+    fontanero_id: Optional[int] = None
+    gremio: str
+    tipo: str
+    descripcion: Optional[str] = None
+    frecuencia: str
+    proxima_ejecucion: datetime.datetime
+    activo: bool
     creado_en: datetime.datetime
     class Config:
         from_attributes = True
