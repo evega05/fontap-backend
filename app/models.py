@@ -40,9 +40,14 @@ class Fontanero(Base):
     vacaciones_hasta = Column(DateTime, nullable=True)
     gremio = Column(String, default="fontanero")  # ver GREMIOS_VALIDOS en main.py
     verificado = Column(Boolean, default=False)
+    certificado_pro = Column(Boolean, default=False)  # certificación propia "Provenza Pro", evaluada por el equipo
     num_trabajos = Column(Integer, default=0)
     stripe_account_id = Column(String, nullable=True)
     comision_checkout_session = Column(String, nullable=True)
+    codigo_referido = Column(String, nullable=True, unique=True)  # para el programa "trae a tu gremio"
+    referido_por_id = Column(Integer, ForeignKey("fontaneros.id"), nullable=True)
+    referido_hasta = Column(DateTime, nullable=True)  # fin del periodo de comisión reducida para el que invitó
+    primeros_trabajos_gratis = Column(Integer, default=3)  # cuántos leads gratis (sin comisión) le quedan por estrenar
 
 class Servicio(Base):
     __tablename__ = "servicios"

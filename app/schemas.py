@@ -22,6 +22,7 @@ class UsuarioRegistro(BaseModel):
         "albanil", "climatizacion", "jardinero", "limpieza", "mudanzas",
         "montador", "cristalero",
     ] = "fontanero"
+    codigo_referido: Optional[str] = None  # código de otro profesional del mismo gremio ("trae a tu gremio")
 
 class UsuarioLogin(BaseModel):
     email: EmailStr
@@ -59,9 +60,12 @@ class FontaneroRespuesta(BaseModel):
     vacaciones_hasta: Optional[datetime.datetime] = None
     gremio: Optional[str] = None
     verificado: bool = False
+    certificado_pro: bool = False
     num_trabajos: int = 0
     precio_desde: Optional[float] = None
     servicios: List[str] = []
+    codigo_referido: Optional[str] = None
+    primeros_trabajos_gratis: int = 0
     class Config:
         from_attributes = True
 

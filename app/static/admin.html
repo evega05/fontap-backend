@@ -146,8 +146,8 @@
     </div>
     <div class="tabla-wrap">
       <table>
-        <thead><tr><th>Profesional</th><th>Gremio</th><th>Verificado</th><th>Stripe</th><th>Comisión pendiente</th><th>Valoración</th><th>Estado</th><th></th></tr></thead>
-        <tbody id="f-tbody"><tr><td colspan="8" class="vacio">Cargando…</td></tr></tbody>
+        <thead><tr><th>Profesional</th><th>Gremio</th><th>Verificado</th><th>Provenza Pro</th><th>Stripe</th><th>Comisión pendiente</th><th>Valoración</th><th>Estado</th><th></th></tr></thead>
+        <tbody id="f-tbody"><tr><td colspan="9" class="vacio">Cargando…</td></tr></tbody>
       </table>
     </div>
   </section>
@@ -297,11 +297,14 @@ function renderProfesionales() {
   const tbody = document.getElementById('f-tbody');
   const gremio = document.getElementById('f-gremio').value;
   const lista = gremio ? _profesionales.filter(f => f.gremio === gremio) : _profesionales;
-  if (!lista.length) { tbody.innerHTML = '<tr><td colspan="8" class="vacio">No hay profesionales que coincidan</td></tr>'; return; }
+  if (!lista.length) { tbody.innerHTML = '<tr><td colspan="9" class="vacio">No hay profesionales que coincidan</td></tr>'; return; }
   tbody.innerHTML = lista.map(f => {
     const verif = f.verificado
       ? '<span class="pill good">✓ Verificado</span>'
       : `<button class="btn small primary" onclick="verificar(${f.id})">Verificar</button>`;
+    const pro = f.certificado_pro
+      ? `<span class="pill good">🏅 Pro</span> <button class="btn small" onclick="certificarPro(${f.id}, false)">Quitar</button>`
+      : `<button class="btn small primary" onclick="certificarPro(${f.id}, true)">Certificar Pro</button>`;
     const stripe = f.stripe_conectado ? '<span class="pill good">✓ Conectado</span>' : '<span class="pill neutro">— No</span>';
     const comision = f.comision_pendiente > 0
       ? `<span class="pill warn">⏳ ${EUR.format(f.comision_pendiente)}</span>` : '<span class="pill neutro">0 €</span>';
@@ -310,7 +313,7 @@ function renderProfesionales() {
     const boton = f.usuario_id ? (f.bloqueado
       ? `<button class="btn small" onclick="vetar(${f.usuario_id}, false)">Quitar veto</button>`
       : `<button class="btn small danger" onclick="vetar(${f.usuario_id}, true)">Vetar</button>`) : '';
-    return `<tr><td>${h(f.nombre)}<div class="sub">${h(f.email || '')}</div></td><td>${h(f.gremio)}</td><td>${verif}</td><td>${stripe}</td><td>${comision}</td><td>${f.valoracion ? '★ ' + f.valoracion : '—'}</td><td>${estado}</td><td>${boton}</td></tr>`;
+    return `<tr><td>${h(f.nombre)}<div class="sub">${h(f.email || '')}</div></td><td>${h(f.gremio)}</td><td>${verif}</td><td>${pro}</td><td>${stripe}</td><td>${comision}</td><td>${f.valoracion ? '★ ' + f.valoracion : '—'}</td><td>${estado}</td><td>${boton}</td></tr>`;
   }).join('');
 }
 
@@ -318,6 +321,15 @@ async function verificar(fontaneroId) {
   if (!confirm('¿Marcar a este profesional como verificado?')) return;
   try {
     await api(`/admin/fontaneros/${fontaneroId}/verificar`, { method: 'PUT' });
+    cargarProfesionales();
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function certificarPro(fontaneroId, certificar) {
+  const msg = certificar ? '¿Certificar a este profesional como Provenza Pro?' : '¿Quitar la certificación Provenza Pro?';
+  if (!confirm(msg)) return;
+  try {
+    await api(`/admin/fontaneros/${fontaneroId}/certificar-pro?certificar=${certificar}`, { method: 'PUT' });
     cargarProfesionales();
   } catch (e) { alert('Error: ' + e.message); }
 }

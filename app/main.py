@@ -51,6 +51,11 @@ def _migrar_columnas_faltantes():
             "ubicacion_actualizada": "TIMESTAMP",
             "stripe_account_id": "VARCHAR",
             "comision_checkout_session": "VARCHAR",
+            "certificado_pro": "BOOLEAN DEFAULT FALSE",
+            "codigo_referido": "VARCHAR",
+            "referido_por_id": "INTEGER",
+            "referido_hasta": "TIMESTAMP",
+            "primeros_trabajos_gratis": "INTEGER DEFAULT 3",
         },
         "usuarios": {
             "terminos_aceptados": "BOOLEAN DEFAULT FALSE",
@@ -203,6 +208,23 @@ def get_or_create_fontanero(db: Session, usuario_id: int, gremio: str = "fontane
         return fontanero
     return None
 
+COMISION_ESTANDAR = 0.05
+COMISION_REDUCIDA_REFERIDO = 0.025
+
+def _tasa_comision(fontanero) -> float:
+    """0% mientras le queden trabajos gratis de bienvenida; 2.5% si está dentro
+    del periodo de comisión reducida por haber invitado a un colega de su gremio
+    (programa 'trae a tu gremio'); 5% en el resto de casos."""
+    if fontanero and (fontanero.primeros_trabajos_gratis or 0) > 0:
+        return 0.0
+    if fontanero and fontanero.referido_hasta and fontanero.referido_hasta > datetime.datetime.utcnow():
+        return COMISION_REDUCIDA_REFERIDO
+    return COMISION_ESTANDAR
+
+def _consumir_trabajo_gratis(fontanero):
+    if fontanero and (fontanero.primeros_trabajos_gratis or 0) > 0:
+        fontanero.primeros_trabajos_gratis -= 1
+
 def _crear_notificacion(db: Session, usuario_id: int, titulo: str, cuerpo: str, tipo: str = None, referencia_id: int = None):
     notif = models.Notificacion(
         usuario_id=usuario_id,
@@ -291,7 +313,23 @@ def registrar_usuario(usuario: schemas.UsuarioRegistro, db: Session = Depends(ge
     db.refresh(nuevo)
 
     if usuario.tipo == "fontanero":
-        get_or_create_fontanero(db, nuevo.id, usuario.gremio)
+        nuevo_fontanero = get_or_create_fontanero(db, nuevo.id, usuario.gremio)
+        nuevo_fontanero.codigo_referido = secrets.token_hex(3).upper()
+        if usuario.codigo_referido:
+            invitador = db.query(models.Fontanero).filter(
+                models.Fontanero.codigo_referido == usuario.codigo_referido.strip().upper(),
+                models.Fontanero.gremio == usuario.gremio,
+            ).first()
+            if invitador:
+                nuevo_fontanero.referido_por_id = invitador.id
+                invitador.referido_hasta = datetime.datetime.utcnow() + datetime.timedelta(days=90)
+                if invitador.usuario_id:
+                    _crear_notificacion(
+                        db, invitador.usuario_id, "¡Gracias por invitar a un colega!",
+                        f"{nuevo.nombre} se ha unido con tu código. Tendrás comisión reducida durante 90 días.",
+                        "referido", nuevo_fontanero.id,
+                    )
+        db.commit()
         _avisar_admin_nuevo_profesional(nuevo.nombre, nuevo.email, usuario.gremio)
 
     token_verificacion = secrets.token_hex(4).upper()
@@ -1197,15 +1235,15 @@ def confirmar_pago(
     nuevo_estado = "pago_pendiente" if datos.metodo == "efectivo" else "pagado"
     servicio.estado = nuevo_estado
     servicio.metodo_pago = datos.metodo
+    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
     if datos.metodo not in ["efectivo", "stripe"]:
         # El dinero (ej. Bizum) va directo cliente→fontanero, sin pasar por Multiservicios Provenza:
         # queda pendiente que el fontanero liquide la comisión de la plataforma.
-        servicio.comision_aplicada = round(servicio.precio * 0.05, 2)
+        servicio.comision_aplicada = round(servicio.precio * _tasa_comision(fontanero_obj), 2)
         servicio.comision_liquidada = False
-    if servicio.fontanero_id:
-        fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
-        if fontanero_obj and fontanero_obj.usuario_id:
-            _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido", f"El cliente ha confirmado el pago de {servicio.precio}€ via {datos.metodo}", "pago_recibido", servicio.id)
+        _consumir_trabajo_gratis(fontanero_obj)
+    if fontanero_obj and fontanero_obj.usuario_id:
+        _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido", f"El cliente ha confirmado el pago de {servicio.precio}€ via {datos.metodo}", "pago_recibido", servicio.id)
     db.commit()
     return {"mensaje": "Pago registrado", "precio": servicio.precio, "metodo": datos.metodo}
 
@@ -1221,8 +1259,10 @@ def confirmar_efectivo(
     servicio.estado = "pagado"
     # El efectivo va directo cliente→fontanero: la comisión de Multiservicios Provenza queda
     # pendiente de que el fontanero la liquide (ver /comision-pendiente).
-    servicio.comision_aplicada = round((servicio.precio or 0) * 0.05, 2)
+    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
+    servicio.comision_aplicada = round((servicio.precio or 0) * _tasa_comision(fontanero_obj), 2)
     servicio.comision_liquidada = False
+    _consumir_trabajo_gratis(fontanero_obj)
     db.commit()
     return {"mensaje": "Efectivo confirmado"}
 
@@ -1785,6 +1825,71 @@ def ver_estadisticas(
         "valoracion_media": fontanero.valoracion,
         "tasa_aceptacion": tasa_aceptacion,
     }
+
+@app.get("/fontaneros/{fontanero_id}/resumen-fiscal")
+def descargar_resumen_fiscal(
+    fontanero_id: int,
+    anio: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    from fastapi.responses import Response
+    try:
+        from reportlab.pdfgen import canvas
+        from reportlab.lib.pagesizes import A4
+        import io
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Generación de PDF no disponible. Instala reportlab.")
+
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+
+    servicios_anio = db.query(models.Servicio).filter(
+        models.Servicio.fontanero_id == fontanero.id,
+        models.Servicio.estado == "pagado",
+        func.extract("year", models.Servicio.creado_en) == anio,
+    ).order_by(models.Servicio.creado_en).all()
+
+    bruto = round(sum(s.precio or 0 for s in servicios_anio), 2)
+    comisiones = round(sum(s.comision_aplicada or 0 for s in servicios_anio), 2)
+    neto = round(bruto - comisiones, 2)
+
+    por_mes = {}
+    for s in servicios_anio:
+        mes = s.creado_en.month if s.creado_en else 0
+        por_mes[mes] = por_mes.get(mes, 0) + (s.precio or 0)
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    w, h = A4
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(50, h - 60, f"Resumen fiscal {anio} — Multiservicios Provenza")
+    c.setFont("Helvetica", 12)
+    c.drawString(50, h - 100, f"Profesional: {fontanero.nombre}")
+    c.drawString(50, h - 120, f"Trabajos pagados en {anio}: {len(servicios_anio)}")
+    c.drawString(50, h - 150, f"Total facturado (bruto): {bruto:.2f} EUR")
+    c.drawString(50, h - 170, f"Comisión de la plataforma: {comisiones:.2f} EUR")
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(50, h - 190, f"Ingreso neto: {neto:.2f} EUR")
+    c.setFont("Helvetica", 11)
+    y = h - 230
+    c.drawString(50, y, "Desglose mensual (bruto):")
+    y -= 20
+    meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio",
+             "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+    for mes_num in range(1, 13):
+        importe = por_mes.get(mes_num, 0)
+        c.drawString(60, y, f"{meses[mes_num - 1]}: {importe:.2f} EUR")
+        y -= 16
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(50, 50, "Documento informativo, no sustituye a la declaración oficial de la Agencia Tributaria.")
+    c.save()
+    buf.seek(0)
+    return Response(
+        content=buf.read(), media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=resumen_fiscal_{anio}.pdf"},
+    )
 
 # ─── BÚSQUEDA Y FILTROS ────────────────────────────────────────────────────────
 
@@ -2368,12 +2473,12 @@ def confirmar_stripe(
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
     servicio.estado = "pagado"
     servicio.metodo_pago = "stripe"
-    comision = round((servicio.precio or 0) * 0.05, 2)
+    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
+    comision = round((servicio.precio or 0) * _tasa_comision(fontanero_obj), 2)
     servicio.comision_aplicada = comision
-    if servicio.fontanero_id:
-        fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
-        if fontanero_obj and fontanero_obj.usuario_id:
-            _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido por Stripe", f"Pago de {servicio.precio}€ confirmado", "pago_recibido", servicio_id)
+    _consumir_trabajo_gratis(fontanero_obj)
+    if fontanero_obj and fontanero_obj.usuario_id:
+        _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido por Stripe", f"Pago de {servicio.precio}€ confirmado", "pago_recibido", servicio_id)
     db.commit()
     return {"mensaje": "Pago confirmado", "precio": servicio.precio, "comision": comision}
 
@@ -2400,11 +2505,11 @@ def crear_stripe_checkout(
         raise HTTPException(status_code=403, detail="Solo el cliente puede pagar este servicio")
 
     fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
-    comision_centavos = round(servicio.precio * 100 * 0.05)
+    comision_centavos = round(servicio.precio * 100 * _tasa_comision(fontanero_obj))
 
     checkout_kwargs = dict(
         mode="payment",
-        payment_method_types=["card"],
+        automatic_payment_methods={"enabled": True},
         line_items=[{
             "price_data": {
                 "currency": "eur",
@@ -2451,13 +2556,13 @@ def verificar_stripe_checkout(
     if session.payment_status == "paid" and not ya_pagado:
         servicio.estado = "pagado"
         servicio.metodo_pago = "stripe"
-        comision = round((servicio.precio or 0) * 0.05, 2)
+        fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
+        comision = round((servicio.precio or 0) * _tasa_comision(fontanero_obj), 2)
         servicio.comision_aplicada = comision
         servicio.comision_liquidada = True  # Stripe ya retuvo/repartió la comisión al cobrar
-        if servicio.fontanero_id:
-            fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
-            if fontanero_obj and fontanero_obj.usuario_id:
-                _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido", f"Pago de {servicio.precio}€ confirmado por Stripe", "pago_recibido", servicio_id)
+        _consumir_trabajo_gratis(fontanero_obj)
+        if fontanero_obj and fontanero_obj.usuario_id:
+            _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido", f"Pago de {servicio.precio}€ confirmado por Stripe", "pago_recibido", servicio_id)
         db.commit()
     return {"pagado": session.payment_status == "paid"}
 
@@ -2576,7 +2681,7 @@ def pagar_comision_pendiente(
     base_url = os.getenv("BACKEND_URL", "https://fontap-backend-production.up.railway.app")
     session = stripe.checkout.Session.create(
         mode="payment",
-        payment_method_types=["card"],
+        automatic_payment_methods={"enabled": True},
         line_items=[{
             "price_data": {
                 "currency": "eur",
@@ -2850,6 +2955,7 @@ def admin_listar_fontaneros(
             "email": usuario.email if usuario else None,
             "gremio": f.gremio or "fontanero",
             "verificado": f.verificado,
+            "certificado_pro": f.certificado_pro,
             "disponible": f.disponible,
             "valoracion": f.valoracion,
             "num_trabajos": f.num_trabajos or 0,
@@ -2886,6 +2992,26 @@ def admin_verificar_fontanero(
         _crear_notificacion(db, fontanero.usuario_id, "¡Perfil verificado!", "Tu perfil ha sido verificado por Multiservicios Provenza", "verificacion", fontanero_id)
     db.commit()
     return {"mensaje": "Fontanero verificado"}
+
+@app.put("/admin/fontaneros/{fontanero_id}/certificar-pro")
+def admin_certificar_pro(
+    fontanero_id: int,
+    certificar: bool = True,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Certificación propia 'Provenza Pro': un nivel por encima de la verificación
+    básica, que el equipo concede tras evaluar personalmente al profesional."""
+    _verificar_admin(current_user)
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    fontanero.certificado_pro = certificar
+    if certificar and fontanero.usuario_id:
+        _crear_notificacion(db, fontanero.usuario_id, "🏅 ¡Ya eres Provenza Pro!",
+                             "Tu perfil ha sido certificado como profesional Provenza Pro", "certificacion_pro", fontanero_id)
+    db.commit()
+    return {"mensaje": "Certificado Provenza Pro actualizado" if certificar else "Certificación Provenza Pro retirada"}
 
 @app.put("/admin/documentos/{doc_id}/revisar")
 def admin_revisar_documento(
