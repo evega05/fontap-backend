@@ -60,6 +60,7 @@ class FontaneroRespuesta(BaseModel):
     gremio: Optional[str] = None
     verificado: bool = False
     num_trabajos: int = 0
+    precio_desde: Optional[float] = None
     class Config:
         from_attributes = True
 

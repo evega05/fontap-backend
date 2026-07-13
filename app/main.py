@@ -18,6 +18,12 @@ GREMIOS_VALIDOS = [
     "montador", "cristalero",
 ]
 
+def _norm_email(email: str) -> str:
+    """Un email dado por el usuario (registro, login, reset...) se compara siempre
+    en minúsculas y sin espacios, para que un teclado que capitaliza la primera
+    letra o un espacio de más no rompa el login/registro."""
+    return (email or "").strip().lower()
+
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -85,11 +91,42 @@ def _limpiar_valoraciones_ficticias():
 
 _limpiar_valoraciones_ficticias()
 
+def _normalizar_emails_existentes():
+    """Los emails guardados antes de este cambio pueden tener mayúsculas o espacios;
+    los pasa a minúsculas/sin espacios para que coincidan con las nuevas búsquedas
+    normalizadas. Si dos cuentas distintas normalizan al mismo email (caso raro:
+    'Ana@x.com' y 'ana@x.com' registradas por separado), se deja la más antigua
+    y se avisa por log en vez de fallar el arranque."""
+    from .database import SessionLocal
+    db = SessionLocal()
+    try:
+        usuarios = db.query(models.Usuario).order_by(models.Usuario.id).all()
+        vistos = {}
+        for u in usuarios:
+            normalizado = _norm_email(u.email)
+            if normalizado == u.email:
+                vistos.setdefault(normalizado, u.id)
+                continue
+            if normalizado in vistos:
+                print(f"[normalizar-email] Conflicto: usuario {u.id} ({u.email!r}) coincide "
+                      f"con el usuario {vistos[normalizado]} tras normalizar. No se modifica, revísalo a mano.")
+                continue
+            u.email = normalizado
+            vistos[normalizado] = u.id
+        db.commit()
+    except Exception as e:
+        print(f"[normalizar-email] Error: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+_normalizar_emails_existentes()
+
 def _crear_admin_inicial():
     """Si ADMIN_EMAIL y ADMIN_PASSWORD están definidos, crea (o promociona) esa cuenta
     como administrador al arrancar. Es la forma de dar de alta el primer admin sin
     exponer la opción en el registro público."""
-    admin_email = os.getenv("ADMIN_EMAIL", "")
+    admin_email = _norm_email(os.getenv("ADMIN_EMAIL", ""))
     admin_pass = os.getenv("ADMIN_PASSWORD", "")
     if not admin_email or not admin_pass:
         return
@@ -225,12 +262,13 @@ def migrar_db():
 
 @app.post("/registro", response_model=schemas.Token)
 def registrar_usuario(usuario: schemas.UsuarioRegistro, db: Session = Depends(get_db)):
-    existe = db.query(models.Usuario).filter(models.Usuario.email == usuario.email).first()
+    email = _norm_email(usuario.email)
+    existe = db.query(models.Usuario).filter(models.Usuario.email == email).first()
     if existe:
         raise HTTPException(status_code=400, detail="Email ya registrado")
     nuevo = models.Usuario(
         nombre=usuario.nombre,
-        email=usuario.email,
+        email=email,
         telefono=usuario.telefono,
         password_hash=auth.hashear_password(usuario.password),
         tipo=usuario.tipo,
@@ -242,6 +280,7 @@ def registrar_usuario(usuario: schemas.UsuarioRegistro, db: Session = Depends(ge
 
     if usuario.tipo == "fontanero":
         get_or_create_fontanero(db, nuevo.id, usuario.gremio)
+        _avisar_admin_nuevo_profesional(nuevo.nombre, nuevo.email, usuario.gremio)
 
     token_verificacion = secrets.token_hex(4).upper()
     db.add(models.VerificacionEmail(
@@ -285,14 +324,14 @@ def _registrar_fallo_login(email: str):
 
 @app.post("/login", response_model=schemas.Token)
 def login(datos: schemas.UsuarioLogin, db: Session = Depends(get_db)):
-    email_normalizado = datos.email.strip().lower()
+    email_normalizado = _norm_email(datos.email)
     minutos = _login_bloqueado(email_normalizado)
     if minutos:
         raise HTTPException(
             status_code=429,
             detail=f"Demasiados intentos fallidos. Inténtalo de nuevo en {minutos} min",
         )
-    usuario = db.query(models.Usuario).filter(models.Usuario.email == datos.email).first()
+    usuario = db.query(models.Usuario).filter(models.Usuario.email == email_normalizado).first()
     if not usuario or not auth.verificar_password(datos.password, usuario.password_hash):
         _registrar_fallo_login(email_normalizado)
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
@@ -339,12 +378,25 @@ def _enviar_email_verificacion(destinatario: str, token: str):
     )
     _enviar_email(destinatario, "Verifica tu email — Multiservicios Provenza", cuerpo, "verificar-email", token)
 
+def _avisar_admin_nuevo_profesional(nombre: str, email: str, gremio: str):
+    """Avisa por email al administrador cuando se registra un profesional nuevo,
+    para que sepa que hay alguien pendiente de verificar."""
+    admin_email = _norm_email(os.getenv("ADMIN_EMAIL", ""))
+    if not admin_email:
+        return
+    cuerpo = (
+        f"Nuevo profesional registrado en Multiservicios Provenza:\n\n"
+        f"Nombre: {nombre}\nEmail: {email}\nGremio: {gremio}\n\n"
+        f"Revísalo y verifícalo desde el panel de administración."
+    )
+    _enviar_email(admin_email, "Nuevo profesional registrado — Multiservicios Provenza", cuerpo, "nuevo-profesional")
+
 class OlvidePasswordDatos(BaseModel):
     email: str
 
 @app.post("/auth/olvide-password")
 def olvide_password(datos: OlvidePasswordDatos, db: Session = Depends(get_db)):
-    usuario = db.query(models.Usuario).filter(models.Usuario.email == datos.email).first()
+    usuario = db.query(models.Usuario).filter(models.Usuario.email == _norm_email(datos.email)).first()
     if usuario:
         token = secrets.token_hex(4).upper()
         reset = models.PasswordReset(
@@ -364,7 +416,7 @@ class ResetPasswordDatos(BaseModel):
 
 @app.post("/auth/resetear-password")
 def resetear_password(datos: ResetPasswordDatos, db: Session = Depends(get_db)):
-    usuario = db.query(models.Usuario).filter(models.Usuario.email == datos.email).first()
+    usuario = db.query(models.Usuario).filter(models.Usuario.email == _norm_email(datos.email)).first()
     error_generico = HTTPException(status_code=400, detail="Código inválido o caducado")
     if not usuario:
         raise error_generico
@@ -388,7 +440,7 @@ class VerificarEmailDatos(BaseModel):
 
 @app.post("/auth/verificar-email")
 def verificar_email(datos: VerificarEmailDatos, db: Session = Depends(get_db)):
-    usuario = db.query(models.Usuario).filter(models.Usuario.email == datos.email).first()
+    usuario = db.query(models.Usuario).filter(models.Usuario.email == _norm_email(datos.email)).first()
     error_generico = HTTPException(status_code=400, detail="Código inválido o caducado")
     if not usuario:
         raise error_generico
@@ -411,7 +463,7 @@ class ReenviarVerificacionDatos(BaseModel):
 
 @app.post("/auth/reenviar-verificacion")
 def reenviar_verificacion(datos: ReenviarVerificacionDatos, db: Session = Depends(get_db)):
-    usuario = db.query(models.Usuario).filter(models.Usuario.email == datos.email).first()
+    usuario = db.query(models.Usuario).filter(models.Usuario.email == _norm_email(datos.email)).first()
     if usuario and not usuario.email_verificado:
         token = secrets.token_hex(4).upper()
         db.add(models.VerificacionEmail(
@@ -447,7 +499,7 @@ def login_google(datos: GoogleAuthDatos, db: Session = Depends(get_db)):
     if GOOGLE_CLIENT_ID and info.get("aud") != GOOGLE_CLIENT_ID:
         raise HTTPException(status_code=401, detail="Token de Google no corresponde a esta app")
 
-    email = info["email"]
+    email = _norm_email(info["email"])
     nombre = info.get("name") or email.split("@")[0]
     usuario = db.query(models.Usuario).filter(models.Usuario.email == email).first()
     if not usuario:
@@ -465,6 +517,7 @@ def login_google(datos: GoogleAuthDatos, db: Session = Depends(get_db)):
         db.refresh(usuario)
         if usuario.tipo == "fontanero":
             get_or_create_fontanero(db, usuario.id)
+            _avisar_admin_nuevo_profesional(usuario.nombre, usuario.email, "fontanero")
 
     token = auth.crear_token({"sub": usuario.email, "tipo": usuario.tipo, "id": usuario.id})
     return {
@@ -606,7 +659,21 @@ def listar_fontaneros(gremio: Optional[str] = None, db: Session = Depends(get_db
     )
     if gremio:
         query = query.filter(models.Fontanero.gremio == gremio)
-    return query.all()
+    fontaneros = query.all()
+
+    from sqlalchemy import func
+    precios_min = dict(
+        db.query(models.ServicioFontanero.fontanero_id, func.min(models.ServicioFontanero.precio))
+        .filter(models.ServicioFontanero.activo == True)
+        .group_by(models.ServicioFontanero.fontanero_id)
+        .all()
+    )
+    resultado = []
+    for f in fontaneros:
+        item = schemas.FontaneroRespuesta.model_validate(f)
+        item.precio_desde = precios_min.get(f.id)
+        resultado.append(item)
+    return resultado
 
 class DisponibilidadUpdate(BaseModel):
     disponible: bool

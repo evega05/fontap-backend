@@ -139,6 +139,11 @@
   </section>
 
   <section id="vista-profesionales" style="display:none">
+    <div class="toolbar">
+      <select id="f-gremio" onchange="renderProfesionales()">
+        <option value="">Todos los gremios</option>
+      </select>
+    </div>
     <div class="tabla-wrap">
       <table>
         <thead><tr><th>Profesional</th><th>Gremio</th><th>Verificado</th><th>Stripe</th><th>Comisión pendiente</th><th>Valoración</th><th>Estado</th><th></th></tr></thead>
@@ -272,26 +277,41 @@ async function vetar(id, bloquear) {
   } catch (e) { alert('Error: ' + e.message); }
 }
 
+let _profesionales = [];
+
 async function cargarProfesionales() {
   const tbody = document.getElementById('f-tbody');
   try {
-    const lista = await api('/admin/fontaneros');
-    if (!lista.length) { tbody.innerHTML = '<tr><td colspan="8" class="vacio">No hay profesionales todavía</td></tr>'; return; }
-    tbody.innerHTML = lista.map(f => {
-      const verif = f.verificado
-        ? '<span class="pill good">✓ Verificado</span>'
-        : `<button class="btn small primary" onclick="verificar(${f.id})">Verificar</button>`;
-      const stripe = f.stripe_conectado ? '<span class="pill good">✓ Conectado</span>' : '<span class="pill neutro">— No</span>';
-      const comision = f.comision_pendiente > 0
-        ? `<span class="pill warn">⏳ ${EUR.format(f.comision_pendiente)}</span>` : '<span class="pill neutro">0 €</span>';
-      const estado = f.bloqueado ? '<span class="pill crit">⛔ Vetado</span>'
-        : (f.disponible ? '<span class="pill good">✓ Disponible</span>' : '<span class="pill neutro">— Inactivo</span>');
-      const boton = f.usuario_id ? (f.bloqueado
-        ? `<button class="btn small" onclick="vetar(${f.usuario_id}, false)">Quitar veto</button>`
-        : `<button class="btn small danger" onclick="vetar(${f.usuario_id}, true)">Vetar</button>`) : '';
-      return `<tr><td>${h(f.nombre)}<div class="sub">${h(f.email || '')}</div></td><td>${h(f.gremio)}</td><td>${verif}</td><td>${stripe}</td><td>${comision}</td><td>${f.valoracion ? '★ ' + f.valoracion : '—'}</td><td>${estado}</td><td>${boton}</td></tr>`;
-    }).join('');
+    _profesionales = await api('/admin/fontaneros');
+    const gremios = [...new Set(_profesionales.map(f => f.gremio).filter(Boolean))].sort();
+    const select = document.getElementById('f-gremio');
+    const actual = select.value;
+    select.innerHTML = '<option value="">Todos los gremios</option>' +
+      gremios.map(g => `<option value="${h(g)}">${h(g)}</option>`).join('');
+    select.value = gremios.includes(actual) ? actual : '';
+    renderProfesionales();
   } catch (e) { tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error: ${h(e.message)}</td></tr>`; }
+}
+
+function renderProfesionales() {
+  const tbody = document.getElementById('f-tbody');
+  const gremio = document.getElementById('f-gremio').value;
+  const lista = gremio ? _profesionales.filter(f => f.gremio === gremio) : _profesionales;
+  if (!lista.length) { tbody.innerHTML = '<tr><td colspan="8" class="vacio">No hay profesionales que coincidan</td></tr>'; return; }
+  tbody.innerHTML = lista.map(f => {
+    const verif = f.verificado
+      ? '<span class="pill good">✓ Verificado</span>'
+      : `<button class="btn small primary" onclick="verificar(${f.id})">Verificar</button>`;
+    const stripe = f.stripe_conectado ? '<span class="pill good">✓ Conectado</span>' : '<span class="pill neutro">— No</span>';
+    const comision = f.comision_pendiente > 0
+      ? `<span class="pill warn">⏳ ${EUR.format(f.comision_pendiente)}</span>` : '<span class="pill neutro">0 €</span>';
+    const estado = f.bloqueado ? '<span class="pill crit">⛔ Vetado</span>'
+      : (f.disponible ? '<span class="pill good">✓ Disponible</span>' : '<span class="pill neutro">— Inactivo</span>');
+    const boton = f.usuario_id ? (f.bloqueado
+      ? `<button class="btn small" onclick="vetar(${f.usuario_id}, false)">Quitar veto</button>`
+      : `<button class="btn small danger" onclick="vetar(${f.usuario_id}, true)">Vetar</button>`) : '';
+    return `<tr><td>${h(f.nombre)}<div class="sub">${h(f.email || '')}</div></td><td>${h(f.gremio)}</td><td>${verif}</td><td>${stripe}</td><td>${comision}</td><td>${f.valoracion ? '★ ' + f.valoracion : '—'}</td><td>${estado}</td><td>${boton}</td></tr>`;
+  }).join('');
 }
 
 async function verificar(fontaneroId) {
