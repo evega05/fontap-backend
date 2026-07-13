@@ -38,7 +38,7 @@ class Fontanero(Base):
     especialidades = Column(Text, nullable=True)
     vacaciones_desde = Column(DateTime, nullable=True)
     vacaciones_hasta = Column(DateTime, nullable=True)
-    gremio = Column(String, default="fontanero")  # fontanero, electricista, pintor, cerrajero
+    gremio = Column(String, default="fontanero")  # ver GREMIOS_VALIDOS en main.py
     verificado = Column(Boolean, default=False)
     num_trabajos = Column(Integer, default=0)
     stripe_account_id = Column(String, nullable=True)
