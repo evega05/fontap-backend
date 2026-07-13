@@ -56,6 +56,7 @@ def _migrar_columnas_faltantes():
         },
         "servicios": {
             "comision_liquidada": "BOOLEAN DEFAULT TRUE",
+            "gremio": "VARCHAR",
         },
         "citas": {
             "recordatorio_24h": "BOOLEAN DEFAULT FALSE",
@@ -668,10 +669,19 @@ def listar_fontaneros(gremio: Optional[str] = None, db: Session = Depends(get_db
         .group_by(models.ServicioFontanero.fontanero_id)
         .all()
     )
+    servicios_por_fontanero = {}
+    for fontanero_id, nombre in (
+        db.query(models.ServicioFontanero.fontanero_id, models.ServicioFontanero.nombre)
+        .filter(models.ServicioFontanero.activo == True)
+        .all()
+    ):
+        servicios_por_fontanero.setdefault(fontanero_id, []).append(nombre)
+
     resultado = []
     for f in fontaneros:
         item = schemas.FontaneroRespuesta.model_validate(f)
         item.precio_desde = precios_min.get(f.id)
+        item.servicios = servicios_por_fontanero.get(f.id, [])
         resultado.append(item)
     return resultado
 
@@ -762,6 +772,11 @@ def crear_servicio(
     current_user: dict = Depends(auth.get_current_user),
 ):
     cliente_id = current_user["id"]
+    fontanero_directo = None
+    if servicio.fontanero_id:
+        fontanero_directo = db.query(models.Fontanero).filter(
+            models.Fontanero.id == servicio.fontanero_id
+        ).first()
     nuevo = models.Servicio(
         cliente_id=cliente_id,
         fontanero_id=servicio.fontanero_id,
@@ -771,21 +786,19 @@ def crear_servicio(
         fecha=servicio.fecha,
         estado="pendiente",
         precio=None,
+        gremio=fontanero_directo.gremio if fontanero_directo else servicio.gremio,
     )
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
-    if servicio.fontanero_id:
-        fontanero_directo = db.query(models.Fontanero).filter(
-            models.Fontanero.id == servicio.fontanero_id
-        ).first()
-        if fontanero_directo:
-            _crear_notificacion(db, fontanero_directo.usuario_id, "Nueva solicitud", f"Tienes una nueva solicitud de {servicio.tipo}", "solicitud_directa", nuevo.id)
-            db.commit()
+    if fontanero_directo:
+        _crear_notificacion(db, fontanero_directo.usuario_id, "Nueva solicitud", f"Tienes una nueva solicitud de {servicio.tipo}", "solicitud_directa", nuevo.id)
+        db.commit()
     elif servicio.urgente:
         fontaneros_zona = db.query(models.Fontanero).filter(
             models.Fontanero.disponible == True,
             models.Fontanero.usuario_id != None,
+            models.Fontanero.gremio == nuevo.gremio,
         ).all()
         for f in fontaneros_zona:
             _crear_notificacion(db, f.usuario_id, "Nueva solicitud urgente", f"Solicitud urgente de {servicio.tipo} cerca de tu zona", "solicitud_urgente", nuevo.id)
@@ -794,13 +807,17 @@ def crear_servicio(
 
 @app.get("/servicios/abiertos", response_model=List[schemas.ServicioRespuesta])
 def listar_servicios_abiertos(
+    gremio: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    servicios = db.query(models.Servicio).filter(
+    query = db.query(models.Servicio).filter(
         models.Servicio.estado == "pendiente",
         models.Servicio.fontanero_id == None,
-    ).order_by(models.Servicio.id.desc()).all()
+    )
+    if gremio:
+        query = query.filter(models.Servicio.gremio == gremio)
+    servicios = query.order_by(models.Servicio.id.desc()).all()
     return [schemas.ServicioRespuesta.from_orm_with_color(s) for s in servicios]
 
 @app.get("/servicios/{servicio_id}")

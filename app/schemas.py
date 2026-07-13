@@ -61,6 +61,7 @@ class FontaneroRespuesta(BaseModel):
     verificado: bool = False
     num_trabajos: int = 0
     precio_desde: Optional[float] = None
+    servicios: List[str] = []
     class Config:
         from_attributes = True
 
@@ -103,6 +104,7 @@ class ServicioCrear(BaseModel):
     urgente: bool = False
     fecha: Optional[datetime.datetime] = None
     fontanero_id: Optional[int] = None
+    gremio: Optional[str] = None
 
 ESTADO_COLORES = {
     "pendiente": "#D97706",
