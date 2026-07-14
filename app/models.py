@@ -40,9 +40,16 @@ class Fontanero(Base):
     vacaciones_hasta = Column(DateTime, nullable=True)
     gremio = Column(String, default="fontanero")  # ver GREMIOS_VALIDOS en main.py
     verificado = Column(Boolean, default=False)
+    certificado_pro = Column(Boolean, default=False)  # certificación propia "Provenza Pro", evaluada por el equipo
     num_trabajos = Column(Integer, default=0)
     stripe_account_id = Column(String, nullable=True)
     comision_checkout_session = Column(String, nullable=True)
+    codigo_referido = Column(String, nullable=True, unique=True)  # para el programa "trae a tu gremio"
+    referido_por_id = Column(Integer, ForeignKey("fontaneros.id"), nullable=True)
+    referido_hasta = Column(DateTime, nullable=True)  # fin del periodo de comisión reducida para el que invitó
+    primeros_trabajos_gratis = Column(Integer, default=3)  # cuántos leads gratis (sin comisión) le quedan por estrenar
+    google_calendar_refresh_token = Column(String, nullable=True)
+    google_calendar_conectado = Column(Boolean, default=False)
 
 class Servicio(Base):
     __tablename__ = "servicios"
@@ -62,6 +69,7 @@ class Servicio(Base):
     comision_aplicada = Column(Float, nullable=True)
     comision_liquidada = Column(Boolean, default=True)
     stripe_payment_intent = Column(String, nullable=True)
+    google_event_id = Column(String, nullable=True)
     creado_en = Column(DateTime, default=utcnow)
 
 class ServicioFontanero(Base):
@@ -112,6 +120,7 @@ class Mensaje(Base):
     servicio_id = Column(Integer, ForeignKey("servicios.id"))
     emisor_id = Column(Integer, ForeignKey("usuarios.id"))
     texto = Column(Text)
+    imagen_url = Column(String, nullable=True)
     leido = Column(Boolean, default=False)
     creado_en = Column(DateTime, default=utcnow)
 
@@ -148,8 +157,17 @@ class Oferta(Base):
     servicio_id = Column(Integer, ForeignKey("servicios.id"))
     fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
     precio = Column(Float)
+    materiales = Column(Float, nullable=True)
+    mano_obra = Column(Float, nullable=True)
     mensaje = Column(Text, nullable=True)
     estado = Column(String, default="pendiente")  # pendiente, aceptada, rechazada
+    creado_en = Column(DateTime, default=utcnow)
+
+class ListaEspera(Base):
+    __tablename__ = "lista_espera"
+    id = Column(Integer, primary_key=True, index=True)
+    cliente_id = Column(Integer, ForeignKey("usuarios.id"))
+    gremio = Column(String)
     creado_en = Column(DateTime, default=utcnow)
 
 class Resena(Base):
@@ -224,6 +242,38 @@ class Inmueble(Base):
     nombre = Column(String)
     direccion = Column(String)
     ciudad = Column(String, default="Bilbao")
+    creado_en = Column(DateTime, default=utcnow)
+
+class ServicioRecurrente(Base):
+    __tablename__ = "servicios_recurrentes"
+    id = Column(Integer, primary_key=True, index=True)
+    cliente_id = Column(Integer, ForeignKey("usuarios.id"))
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"), nullable=True)
+    gremio = Column(String)
+    tipo = Column(String)
+    descripcion = Column(Text, nullable=True)
+    frecuencia = Column(String)  # semanal, quincenal, mensual
+    proxima_ejecucion = Column(DateTime)
+    activo = Column(Boolean, default=True)
+    creado_en = Column(DateTime, default=utcnow)
+
+class Proyecto(Base):
+    __tablename__ = "proyectos"
+    id = Column(Integer, primary_key=True, index=True)
+    administrador_id = Column(Integer, ForeignKey("usuarios.id"))
+    titulo = Column(String)
+    descripcion = Column(Text, nullable=True)
+    gremios = Column(String)  # coma-separada, ej. "electricista,fontanero,pintor"
+    ciudad = Column(String, default="Bilbao")
+    estado = Column(String, default="abierto")  # abierto, cerrado
+    creado_en = Column(DateTime, default=utcnow)
+
+class ProyectoInteres(Base):
+    __tablename__ = "proyectos_interes"
+    id = Column(Integer, primary_key=True, index=True)
+    proyecto_id = Column(Integer, ForeignKey("proyectos.id"))
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    mensaje = Column(Text, nullable=True)
     creado_en = Column(DateTime, default=utcnow)
 
 class DocumentoVerificacion(Base):
