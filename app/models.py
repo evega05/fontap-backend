@@ -48,6 +48,8 @@ class Fontanero(Base):
     referido_por_id = Column(Integer, ForeignKey("fontaneros.id"), nullable=True)
     referido_hasta = Column(DateTime, nullable=True)  # fin del periodo de comisión reducida para el que invitó
     primeros_trabajos_gratis = Column(Integer, default=3)  # cuántos leads gratis (sin comisión) le quedan por estrenar
+    google_calendar_refresh_token = Column(String, nullable=True)
+    google_calendar_conectado = Column(Boolean, default=False)
 
 class Servicio(Base):
     __tablename__ = "servicios"
@@ -67,6 +69,7 @@ class Servicio(Base):
     comision_aplicada = Column(Float, nullable=True)
     comision_liquidada = Column(Boolean, default=True)
     stripe_payment_intent = Column(String, nullable=True)
+    google_event_id = Column(String, nullable=True)
     creado_en = Column(DateTime, default=utcnow)
 
 class ServicioFontanero(Base):

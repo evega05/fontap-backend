@@ -66,6 +66,7 @@ class FontaneroRespuesta(BaseModel):
     servicios: List[str] = []
     codigo_referido: Optional[str] = None
     primeros_trabajos_gratis: int = 0
+    google_calendar_conectado: bool = False
     class Config:
         from_attributes = True
 

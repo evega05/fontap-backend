@@ -56,6 +56,8 @@ def _migrar_columnas_faltantes():
             "referido_por_id": "INTEGER",
             "referido_hasta": "TIMESTAMP",
             "primeros_trabajos_gratis": "INTEGER DEFAULT 3",
+            "google_calendar_refresh_token": "VARCHAR",
+            "google_calendar_conectado": "BOOLEAN DEFAULT FALSE",
         },
         "usuarios": {
             "terminos_aceptados": "BOOLEAN DEFAULT FALSE",
@@ -66,6 +68,7 @@ def _migrar_columnas_faltantes():
         "servicios": {
             "comision_liquidada": "BOOLEAN DEFAULT TRUE",
             "gremio": "VARCHAR",
+            "google_event_id": "VARCHAR",
         },
         "citas": {
             "recordatorio_24h": "BOOLEAN DEFAULT FALSE",
@@ -263,6 +266,164 @@ def _crear_notificacion(db: Session, usuario_id: int, titulo: str, cuerpo: str, 
 @app.get("/")
 def inicio():
     return {"mensaje": "Multiservicios Provenza API funcionando"}
+
+# ─── LANDING PAGES SEO (gremio × ciudad) ───────────────────────────────────────
+GREMIOS_LANDING = {
+    "fontanero": {"nombre": "Fontanero", "plural": "fontaneros", "emoji": "🔧", "servicios": ["Desatascos", "Fugas de agua", "Calderas", "Grifería y duchas"]},
+    "electricista": {"nombre": "Electricista", "plural": "electricistas", "emoji": "⚡", "servicios": ["Cortocircuitos", "Instalaciones eléctricas", "Cuadros eléctricos", "Iluminación"]},
+    "cerrajero": {"nombre": "Cerrajero", "plural": "cerrajeros", "emoji": "🔑", "servicios": ["Apertura de puertas", "Cambio de cerraduras", "Llaves perdidas", "Puertas blindadas"]},
+    "pintor": {"nombre": "Pintor", "plural": "pintores", "emoji": "🎨", "servicios": ["Pintura de interior", "Pintura de fachada", "Gotelé y alisado", "Humedades"]},
+    "carpintero": {"nombre": "Carpintero", "plural": "carpinteros", "emoji": "🪚", "servicios": ["Muebles a medida", "Puertas y armarios", "Suelos de madera", "Reparación de muebles"]},
+    "albanil": {"nombre": "Albañil", "plural": "albañiles", "emoji": "🧱", "servicios": ["Reformas", "Alicatados", "Grietas y humedades", "Tabiquería"]},
+    "climatizacion": {"nombre": "Técnico de climatización", "plural": "técnicos de climatización", "emoji": "❄️", "servicios": ["Instalación de aire acondicionado", "Mantenimiento de calderas", "Averías de climatización", "Bombas de calor"]},
+    "jardinero": {"nombre": "Jardinero", "plural": "jardineros", "emoji": "🌿", "servicios": ["Mantenimiento de jardines", "Poda", "Diseño de jardines", "Riego automático"]},
+    "limpieza": {"nombre": "Servicio de limpieza", "plural": "profesionales de limpieza", "emoji": "🧹", "servicios": ["Limpieza de hogar", "Limpieza tras obra", "Limpieza de oficinas", "Limpieza de cristales"]},
+    "mudanzas": {"nombre": "Empresa de mudanzas", "plural": "profesionales de mudanzas", "emoji": "📦", "servicios": ["Mudanzas locales", "Guardamuebles", "Embalaje", "Montaje de muebles"]},
+    "montador": {"nombre": "Montador de muebles", "plural": "montadores de muebles", "emoji": "🪑", "servicios": ["Montaje de IKEA", "Montaje de cocinas", "Colgado de estanterías", "Ensamblaje de muebles"]},
+    "cristalero": {"nombre": "Cristalero", "plural": "cristaleros", "emoji": "🪟", "servicios": ["Cambio de cristales", "Mamparas de ducha", "Cristales de seguridad", "Escaparates"]},
+}
+CIUDADES_LANDING = {"bilbao": "Bilbao", "madrid": "Madrid", "barcelona": "Barcelona"}
+
+
+def _landing_base_url() -> str:
+    return os.getenv("BACKEND_URL", "https://fontap-backend-production.up.railway.app")
+
+
+def _landing_head(titulo: str, descripcion: str, canonical: str, json_ld: dict) -> str:
+    import json as _json
+    return f"""<meta charset="utf-8">
+<title>{titulo}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="{descripcion}">
+<link rel="canonical" href="{canonical}">
+<meta property="og:title" content="{titulo}">
+<meta property="og:description" content="{descripcion}">
+<meta property="og:type" content="website">
+<meta name="robots" content="index, follow">
+<script type="application/ld+json">{_json.dumps(json_ld, ensure_ascii=False)}</script>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 720px; margin: 0 auto; padding: 40px 20px; color: #17202a; line-height: 1.6; }}
+  h1 {{ font-size: 28px; margin-bottom: 8px; }}
+  h2 {{ font-size: 19px; margin-top: 32px; }}
+  .emoji {{ font-size: 40px; }}
+  ul {{ padding-left: 22px; }}
+  li {{ margin-bottom: 4px; }}
+  .cta {{ margin-top: 32px; padding: 20px; background: #f2f4f7; border-radius: 14px; text-align: center; }}
+  a {{ color: #276EF1; }}
+  footer {{ margin-top: 48px; font-size: 12.5px; color: #8a94a6; }}
+</style>"""
+
+
+def _landing_html(gremio: str, ciudad: str) -> str:
+    info = GREMIOS_LANDING[gremio]
+    ciudad_nombre = CIUDADES_LANDING[ciudad]
+    canonical = f"{_landing_base_url()}/landing/{gremio}/{ciudad}"
+    titulo = f"{info['nombre']} en {ciudad_nombre} | Multiservicios Provenza"
+    descripcion = f"Encuentra {info['plural']} verificados en {ciudad_nombre}. Presupuesto claro antes de empezar, pago seguro y reseñas reales. {', '.join(info['servicios'])}."
+    json_ld = {
+        "@context": "https://schema.org",
+        "@type": "Service",
+        "serviceType": info["nombre"],
+        "areaServed": {"@type": "City", "name": ciudad_nombre},
+        "provider": {"@type": "Organization", "name": "Multiservicios Provenza"},
+        "description": descripcion,
+    }
+    servicios_li = "".join(f"<li>{s}</li>" for s in info["servicios"])
+    otros_gremios = " · ".join(
+        f'<a href="/landing/{g}/{ciudad}">{i["emoji"]} {i["nombre"]}</a>'
+        for g, i in GREMIOS_LANDING.items() if g != gremio
+    )
+    return f"""<!doctype html>
+<html lang="es">
+<head>
+{_landing_head(titulo, descripcion, canonical, json_ld)}
+</head>
+<body>
+<div class="emoji">{info['emoji']}</div>
+<h1>{info['nombre']} en {ciudad_nombre}</h1>
+<p>{descripcion}</p>
+<h2>Servicios más solicitados</h2>
+<ul>{servicios_li}</ul>
+<h2>¿Por qué Multiservicios Provenza?</h2>
+<ul>
+  <li>✅ Profesionales verificados, con reseñas reales de otros clientes</li>
+  <li>💶 Presupuesto claro antes de empezar el trabajo</li>
+  <li>🔒 Pago seguro dentro de la app</li>
+  <li>⚡ Disponibilidad urgente en {ciudad_nombre}</li>
+</ul>
+<div class="cta">
+  <p><strong>Multiservicios Provenza</strong> llega muy pronto a {ciudad_nombre}.</p>
+  <p><a href="/landing">Ver todos los oficios y ciudades</a></p>
+</div>
+<h2>Otros oficios en {ciudad_nombre}</h2>
+<p>{otros_gremios}</p>
+<footer>Multiservicios Provenza · profesionales del hogar en Bilbao, Madrid y Barcelona</footer>
+</body>
+</html>"""
+
+
+def _landing_index_html() -> str:
+    canonical = f"{_landing_base_url()}/landing"
+    titulo = "Profesionales del hogar verificados | Multiservicios Provenza"
+    descripcion = "Fontaneros, electricistas, cerrajeros y más de 10 oficios del hogar, verificados y con presupuesto claro, en Bilbao, Madrid y Barcelona."
+    json_ld = {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        "name": "Multiservicios Provenza",
+        "description": descripcion,
+    }
+    filas = ""
+    for g, info in GREMIOS_LANDING.items():
+        enlaces = " · ".join(f'<a href="/landing/{g}/{c}">{nombre}</a>' for c, nombre in CIUDADES_LANDING.items())
+        filas += f"<li>{info['emoji']} <strong>{info['nombre']}</strong>: {enlaces}</li>"
+    return f"""<!doctype html>
+<html lang="es">
+<head>
+{_landing_head(titulo, descripcion, canonical, json_ld)}
+</head>
+<body>
+<div class="emoji">🏠</div>
+<h1>Profesionales del hogar cerca de ti</h1>
+<p>{descripcion}</p>
+<ul>{filas}</ul>
+<footer>Multiservicios Provenza</footer>
+</body>
+</html>"""
+
+
+@app.get("/landing")
+def landing_index():
+    from fastapi.responses import Response
+    return Response(content=_landing_index_html(), media_type="text/html")
+
+
+@app.get("/landing/{gremio}/{ciudad}")
+def landing_gremio_ciudad(gremio: str, ciudad: str):
+    from fastapi.responses import Response
+    if gremio not in GREMIOS_LANDING or ciudad not in CIUDADES_LANDING:
+        raise HTTPException(status_code=404, detail="Página no encontrada")
+    return Response(content=_landing_html(gremio, ciudad), media_type="text/html")
+
+
+@app.get("/sitemap.xml")
+def sitemap_xml():
+    from fastapi.responses import Response
+    base = _landing_base_url()
+    urls = [f"{base}/", f"{base}/landing"]
+    for g in GREMIOS_LANDING:
+        for c in CIUDADES_LANDING:
+            urls.append(f"{base}/landing/{g}/{c}")
+    items = "".join(f"<url><loc>{u}</loc></url>" for u in urls)
+    xml = f'<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{items}</urlset>'
+    return Response(content=xml, media_type="application/xml")
+
+
+@app.get("/robots.txt")
+def robots_txt():
+    from fastapi.responses import Response
+    base = _landing_base_url()
+    txt = f"User-agent: *\nAllow: /landing\nDisallow: /admin\nDisallow: /uploads\nSitemap: {base}/sitemap.xml\n"
+    return Response(content=txt, media_type="text/plain")
 
 @app.post("/migrar-db")
 def migrar_db():
@@ -1170,6 +1331,7 @@ def aceptar_servicio(
     servicio.estado = "aceptado"
     _crear_notificacion(db, servicio.cliente_id, "Servicio aceptado", f"Un fontanero ha aceptado tu solicitud de {servicio.tipo}", "servicio_aceptado", servicio.id)
     db.commit()
+    _google_calendar_sync(db, servicio)
     return {"mensaje": "Servicio aceptado"}
 
 @app.put("/servicios/{servicio_id}/rechazar")
@@ -1288,6 +1450,7 @@ def cancelar_servicio(
 
     servicio.estado = "cancelado"
     db.commit()
+    _google_calendar_borrar(db, servicio)
 
     if es_cliente and servicio.fontanero_id:
         fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
@@ -2188,6 +2351,7 @@ def aceptar_oferta(
     if fontanero and fontanero.usuario_id:
         _crear_notificacion(db, fontanero.usuario_id, "¡Tu oferta fue aceptada!", f"El cliente aceptó tu oferta de {oferta.precio}€", "oferta_aceptada", servicio_id)
     db.commit()
+    _google_calendar_sync(db, servicio)
     return {"mensaje": "Oferta aceptada"}
 
 @app.put("/servicios/{servicio_id}/ofertas/{oferta_id}/rechazar")
@@ -2352,6 +2516,176 @@ def eliminar_cita(
     db.delete(cita)
     db.commit()
     return {"mensaje": "Cita eliminada"}
+
+# ─── GOOGLE CALENDAR (sincronización de citas confirmadas) ────────────────────
+# Requiere GOOGLE_CLIENT_ID (ya usado por "Sign in with Google") y además
+# GOOGLE_CLIENT_SECRET, con la Calendar API habilitada en el mismo proyecto de
+# Google Cloud Console, y la redirect URI de abajo dada de alta ahí.
+
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+
+
+def _google_calendar_redirect_uri() -> str:
+    base_url = os.getenv("BACKEND_URL", "https://fontap-backend-production.up.railway.app")
+    return f"{base_url}/auth/google/calendar/callback"
+
+
+def _google_calendar_access_token(fontanero) -> Optional[str]:
+    if not (fontanero and fontanero.google_calendar_refresh_token and GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET):
+        return None
+    try:
+        resp = _http.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "refresh_token": fontanero.google_calendar_refresh_token,
+                "grant_type": "refresh_token",
+            },
+            timeout=8,
+        )
+        if resp.status_code != 200:
+            return None
+        return resp.json().get("access_token")
+    except Exception:
+        return None
+
+
+def _google_calendar_evento_body(servicio) -> dict:
+    inicio = servicio.fecha
+    fin = inicio + datetime.timedelta(hours=2)
+    return {
+        "summary": f"{servicio.tipo or 'Servicio'} · Multiservicios Provenza",
+        "description": f"Solicitud #{servicio.id}" + (f"\n{servicio.descripcion}" if servicio.descripcion else ""),
+        "start": {"dateTime": inicio.isoformat(), "timeZone": "Europe/Madrid"},
+        "end": {"dateTime": fin.isoformat(), "timeZone": "Europe/Madrid"},
+    }
+
+
+def _google_calendar_sync(db: Session, servicio) -> None:
+    """Best-effort: crea o actualiza el evento en el Google Calendar del profesional.
+    Si algo falla (token revocado, sin red, etc.) no interrumpe el flujo principal."""
+    if not servicio.fontanero_id or not servicio.fecha:
+        return
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
+    if not fontanero or not fontanero.google_calendar_conectado:
+        return
+    access_token = _google_calendar_access_token(fontanero)
+    if not access_token:
+        return
+    headers = {"Authorization": f"Bearer {access_token}"}
+    body = _google_calendar_evento_body(servicio)
+    try:
+        if servicio.google_event_id:
+            resp = _http.patch(
+                f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{servicio.google_event_id}",
+                json=body, headers=headers, timeout=8,
+            )
+        else:
+            resp = _http.post(
+                "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                json=body, headers=headers, timeout=8,
+            )
+            if resp.status_code in (200, 201):
+                servicio.google_event_id = resp.json().get("id")
+                db.commit()
+    except Exception:
+        pass
+
+
+def _google_calendar_borrar(db: Session, servicio) -> None:
+    if not servicio.google_event_id or not servicio.fontanero_id:
+        return
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
+    access_token = _google_calendar_access_token(fontanero)
+    if not access_token:
+        return
+    try:
+        _http.delete(
+            f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{servicio.google_event_id}",
+            headers={"Authorization": f"Bearer {access_token}"}, timeout=8,
+        )
+    except Exception:
+        pass
+    servicio.google_event_id = None
+    db.commit()
+
+
+@app.get("/fontaneros/{fontanero_id}/google-calendar/conectar")
+def google_calendar_conectar(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    if current_user["id"] != fontanero_id:
+        raise HTTPException(status_code=403, detail="Solo puedes conectar tu propio calendario")
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        raise HTTPException(status_code=400, detail="Google Calendar no está configurado en el servidor")
+    from urllib.parse import urlencode
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": _google_calendar_redirect_uri(),
+        "response_type": "code",
+        "access_type": "offline",
+        "prompt": "consent",
+        "scope": "https://www.googleapis.com/auth/calendar.events",
+        "state": str(fontanero_id),
+    }
+    return {"url": f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"}
+
+
+@app.get("/auth/google/calendar/callback")
+def google_calendar_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None, db: Session = Depends(get_db)):
+    from fastapi.responses import Response
+
+    def _pagina(mensaje: str) -> Response:
+        return Response(
+            content=f"<html><body style='font-family:sans-serif;text-align:center;padding:60px 20px;'><h2>{mensaje}</h2><p>Ya puedes volver a la app.</p></body></html>",
+            media_type="text/html",
+        )
+
+    if error or not code or not state:
+        return _pagina("❌ No se pudo conectar Google Calendar")
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == int(state)).first()
+    if not fontanero:
+        return _pagina("❌ Profesional no encontrado")
+    try:
+        resp = _http.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "code": code,
+                "grant_type": "authorization_code",
+                "redirect_uri": _google_calendar_redirect_uri(),
+            },
+            timeout=8,
+        )
+        datos_token = resp.json()
+    except Exception:
+        return _pagina("❌ No se pudo completar la conexión con Google")
+    refresh_token = datos_token.get("refresh_token")
+    if not refresh_token:
+        return _pagina("⚠️ Google no devolvió permiso permanente. Desconecta el acceso de Multiservicios Provenza en tu cuenta de Google y vuelve a intentarlo")
+    fontanero.google_calendar_refresh_token = refresh_token
+    fontanero.google_calendar_conectado = True
+    db.commit()
+    return _pagina("✅ Google Calendar conectado")
+
+
+@app.delete("/fontaneros/{fontanero_id}/google-calendar")
+def google_calendar_desconectar(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = _resolver_fontanero(db, fontanero_id)
+    if current_user["id"] != fontanero_id:
+        raise HTTPException(status_code=403, detail="Solo puedes desconectar tu propio calendario")
+    fontanero.google_calendar_refresh_token = None
+    fontanero.google_calendar_conectado = False
+    db.commit()
+    return {"mensaje": "Google Calendar desconectado"}
 
 # ─── HISTORIAL DE PAGOS FONTANERO ─────────────────────────────────────────────
 
