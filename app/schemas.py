@@ -16,6 +16,13 @@ class UsuarioRegistro(BaseModel):
     telefono: str
     password: str
     tipo: Literal["cliente", "fontanero", "administrador_fincas"] = "cliente"
+    terminos_aceptados: bool = False
+    gremio: Literal[
+        "fontanero", "electricista", "cerrajero", "pintor", "carpintero",
+        "albanil", "climatizacion", "jardinero", "limpieza", "mudanzas",
+        "montador", "cristalero",
+    ] = "fontanero"
+    codigo_referido: Optional[str] = None  # código de otro profesional del mismo gremio ("trae a tu gremio")
 
 class UsuarioLogin(BaseModel):
     email: EmailStr
@@ -27,6 +34,10 @@ class UsuarioRespuesta(BaseModel):
     email: str
     telefono: str
     tipo: str
+    email_verificado: Optional[bool] = False
+    telefono_verificado: Optional[bool] = False
+    bloqueado: Optional[bool] = False
+    creado_en: Optional[datetime.datetime] = None
     class Config:
         from_attributes = True
 
@@ -34,6 +45,7 @@ class FontaneroRespuesta(BaseModel):
     id: int
     usuario_id: Optional[int] = None
     nombre: Optional[str] = None
+    telefono: Optional[str] = None
     zona: Optional[str] = None
     disponible: bool
     disponible_24h: bool = False
@@ -48,7 +60,13 @@ class FontaneroRespuesta(BaseModel):
     vacaciones_hasta: Optional[datetime.datetime] = None
     gremio: Optional[str] = None
     verificado: bool = False
+    certificado_pro: bool = False
     num_trabajos: int = 0
+    precio_desde: Optional[float] = None
+    servicios: List[str] = []
+    codigo_referido: Optional[str] = None
+    primeros_trabajos_gratis: int = 0
+    google_calendar_conectado: bool = False
     class Config:
         from_attributes = True
 
@@ -91,10 +109,12 @@ class ServicioCrear(BaseModel):
     urgente: bool = False
     fecha: Optional[datetime.datetime] = None
     fontanero_id: Optional[int] = None
+    gremio: Optional[str] = None
 
 ESTADO_COLORES = {
     "pendiente": "#D97706",
     "aceptado": "#0A7A3E",
+    "en_camino": "#1A56DB",
     "rechazado": "#C8271A",
     "pagado": "#0A7A3E",
     "precio_enviado": "#1A56DB",
@@ -193,6 +213,7 @@ class MensajeRespuesta(BaseModel):
     servicio_id: int
     emisor_id: int
     texto: str
+    imagen_url: Optional[str] = None
     leido: bool
     creado_en: datetime.datetime
     class Config:
@@ -223,7 +244,9 @@ class FavoritoRespuesta(BaseModel):
         from_attributes = True
 
 class OfertaCrear(BaseModel):
-    precio: float
+    precio: Optional[float] = None
+    materiales: Optional[float] = None
+    mano_obra: Optional[float] = None
     mensaje: Optional[str] = None
 
 class OfertaRespuesta(BaseModel):
@@ -231,6 +254,8 @@ class OfertaRespuesta(BaseModel):
     servicio_id: int
     fontanero_id: int
     precio: float
+    materiales: Optional[float] = None
+    mano_obra: Optional[float] = None
     mensaje: Optional[str] = None
     estado: str
     creado_en: datetime.datetime
@@ -240,6 +265,79 @@ class OfertaRespuesta(BaseModel):
     fontanero_trabajos: Optional[int] = None
     tipo: Optional[str] = None
     zona: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class ListaEsperaCrear(BaseModel):
+    gremio: str
+
+class ListaEsperaRespuesta(BaseModel):
+    id: int
+    cliente_id: int
+    gremio: str
+    creado_en: datetime.datetime
+    class Config:
+        from_attributes = True
+
+class ServicioRecurrenteCrear(BaseModel):
+    gremio: str
+    tipo: str
+    descripcion: Optional[str] = None
+    frecuencia: Literal["semanal", "quincenal", "mensual"]
+    fontanero_id: Optional[int] = None
+    proxima_ejecucion: datetime.datetime
+
+class ServicioRecurrenteActualizar(BaseModel):
+    activo: Optional[bool] = None
+    frecuencia: Optional[Literal["semanal", "quincenal", "mensual"]] = None
+
+class ServicioRecurrenteRespuesta(BaseModel):
+    id: int
+    cliente_id: int
+    fontanero_id: Optional[int] = None
+    gremio: str
+    tipo: str
+    descripcion: Optional[str] = None
+    frecuencia: str
+    proxima_ejecucion: datetime.datetime
+    activo: bool
+    creado_en: datetime.datetime
+    class Config:
+        from_attributes = True
+
+class ProyectoCrear(BaseModel):
+    titulo: str
+    descripcion: Optional[str] = None
+    gremios: List[str]
+    ciudad: str = "Bilbao"
+
+class ProyectoRespuesta(BaseModel):
+    id: int
+    administrador_id: int
+    titulo: str
+    descripcion: Optional[str] = None
+    gremios: str
+    ciudad: str
+    estado: str
+    creado_en: datetime.datetime
+    num_interesados: int = 0
+    class Config:
+        from_attributes = True
+
+class ProyectoActualizar(BaseModel):
+    estado: Optional[Literal["abierto", "cerrado"]] = None
+
+class ProyectoInteresCrear(BaseModel):
+    mensaje: Optional[str] = None
+
+class ProyectoInteresRespuesta(BaseModel):
+    id: int
+    proyecto_id: int
+    fontanero_id: int
+    mensaje: Optional[str] = None
+    creado_en: datetime.datetime
+    fontanero_nombre: Optional[str] = None
+    fontanero_valoracion: Optional[float] = None
     class Config:
         from_attributes = True
 
@@ -261,6 +359,25 @@ class ResenaRespuesta(BaseModel):
     trato: float
     comentario: Optional[str] = None
     creado_en: datetime.datetime
+
+class ResenaClienteCrear(BaseModel):
+    puntualidad: float
+    trato: float
+    comunicacion: float
+    comentario: Optional[str] = None
+
+class ResenaClienteRespuesta(BaseModel):
+    id: int
+    servicio_id: int
+    fontanero_id: int
+    cliente_id: int
+    puntualidad: float
+    trato: float
+    comunicacion: float
+    comentario: Optional[str] = None
+    creado_en: datetime.datetime
+    class Config:
+        from_attributes = True
     class Config:
         from_attributes = True
 
@@ -316,3 +433,9 @@ class AdminStats(BaseModel):
     servicios_pendientes: int
     servicios_completados: int
     ingresos_plataforma: float
+    dinero_movido: float = 0
+    comisiones_pendientes: float = 0
+    usuarios_nuevos_7d: int = 0
+    servicios_7d: int = 0
+    usuarios_bloqueados: int = 0
+    por_gremio: Optional[dict] = None

@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multiservicios Provenza — Administración</title>
+<style>
+  :root {
+    --bg: #070B14; --surface: #0D1420; --surface2: #141D2E; --border: #1E2A40;
+    --ink: #E8EDF5; --ink2: #9AA8BF; --ink3: #64748B;
+    --blue: #3D7EFF; --blue-dim: #16274D;
+    --good: #34D399; --good-bg: #0A2E22;
+    --warn: #FBBF24; --warn-bg: #33260A;
+    --crit: #F87171; --crit-bg: #35100D;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink); min-height: 100vh;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 20px 60px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 26px; flex-wrap: wrap; }
+  header h1 { font-size: 17px; font-weight: 700; letter-spacing: -0.2px; }
+  header h1 span { color: var(--ink3); font-weight: 500; }
+  .btn {
+    background: var(--surface2); color: var(--ink); border: 1px solid var(--border);
+    border-radius: 9px; padding: 7px 14px; font-size: 13px; cursor: pointer; font-weight: 600;
+  }
+  .btn:hover { border-color: var(--ink3); }
+  .btn.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  .btn.danger { background: transparent; border-color: var(--crit); color: var(--crit); }
+  .btn.danger:hover { background: var(--crit-bg); }
+  .btn.small { padding: 4px 10px; font-size: 12px; border-radius: 7px; }
+  .btn:disabled { opacity: .45; cursor: default; }
+
+  /* Login */
+  #login { max-width: 360px; margin: 10vh auto 0; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 28px; }
+  #login h2 { font-size: 18px; margin-bottom: 4px; }
+  #login p { color: var(--ink2); font-size: 13px; margin-bottom: 20px; }
+  #login input {
+    width: 100%; background: var(--surface2); border: 1px solid var(--border); color: var(--ink);
+    border-radius: 10px; padding: 11px 12px; font-size: 14px; margin-bottom: 12px; outline: none;
+  }
+  #login input:focus { border-color: var(--blue); }
+  #login .btn { width: 100%; padding: 11px; }
+  #login .error { color: var(--crit); font-size: 13px; margin: 4px 0 10px; min-height: 18px; }
+
+  /* Tabs */
+  nav { display: flex; gap: 6px; margin-bottom: 20px; border-bottom: 1px solid var(--border); }
+  nav button {
+    background: none; border: none; color: var(--ink2); font-size: 14px; font-weight: 600;
+    padding: 9px 14px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  nav button.activo { color: var(--ink); border-bottom-color: var(--blue); }
+
+  /* KPI tiles */
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px; }
+  .tile .label { color: var(--ink2); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
+  .tile .valor { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.5px; }
+  .tile .sub { color: var(--ink3); font-size: 12px; margin-top: 2px; }
+  .gremios { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px; }
+  .gremios .label { color: var(--ink2); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 10px; }
+  .gremios ul { list-style: none; display: flex; gap: 18px; flex-wrap: wrap; }
+  .gremios li { font-size: 14px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .gremios li span { color: var(--ink2); }
+
+  /* Toolbar + table */
+  .toolbar { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+  .toolbar input, .toolbar select {
+    background: var(--surface2); border: 1px solid var(--border); color: var(--ink);
+    border-radius: 9px; padding: 8px 12px; font-size: 13px; outline: none;
+  }
+  .toolbar input { flex: 1; min-width: 180px; }
+  .tabla-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--ink2); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; padding: 12px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { padding: 11px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: none; }
+  td .sub { color: var(--ink3); font-size: 12px; }
+
+  .pill { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 2px 9px; font-size: 11.5px; font-weight: 600; }
+  .pill.good { background: var(--good-bg); color: var(--good); }
+  .pill.warn { background: var(--warn-bg); color: var(--warn); }
+  .pill.crit { background: var(--crit-bg); color: var(--crit); }
+  .pill.neutro { background: var(--surface2); color: var(--ink2); }
+
+  .vacio { color: var(--ink3); text-align: center; padding: 30px; }
+  #app { display: none; }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <h2>Panel de administración</h2>
+  <p>Multiservicios Provenza</p>
+  <input id="l-email" type="email" placeholder="Email de administrador" autocomplete="username">
+  <input id="l-pass" type="password" placeholder="Contraseña" autocomplete="current-password">
+  <div class="error" id="l-error"></div>
+  <button class="btn primary" onclick="entrar()">Entrar</button>
+</div>
+
+<div class="wrap" id="app">
+  <header>
+    <h1>Multiservicios Provenza <span>· Administración</span></h1>
+    <button class="btn" onclick="salir()">Cerrar sesión</button>
+  </header>
+
+  <nav>
+    <button id="tab-resumen" class="activo" onclick="verTab('resumen')">Resumen</button>
+    <button id="tab-usuarios" onclick="verTab('usuarios')">Usuarios</button>
+    <button id="tab-profesionales" onclick="verTab('profesionales')">Profesionales</button>
+  </nav>
+
+  <section id="vista-resumen">
+    <div class="tiles" id="tiles"></div>
+    <div class="gremios" id="gremios" style="display:none">
+      <div class="label">Profesionales por gremio</div>
+      <ul id="gremios-lista"></ul>
+    </div>
+  </section>
+
+  <section id="vista-usuarios" style="display:none">
+    <div class="toolbar">
+      <input id="u-buscar" placeholder="Buscar por nombre o email…" oninput="filtrarUsuariosDebounce()">
+      <select id="u-tipo" onchange="cargarUsuarios()">
+        <option value="">Todos los tipos</option>
+        <option value="cliente">Clientes</option>
+        <option value="fontanero">Profesionales</option>
+        <option value="admin">Administradores</option>
+      </select>
+    </div>
+    <div class="tabla-wrap">
+      <table>
+        <thead><tr><th>Usuario</th><th>Tipo</th><th>Verificación</th><th>Estado</th><th>Alta</th><th></th></tr></thead>
+        <tbody id="u-tbody"><tr><td colspan="6" class="vacio">Cargando…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="vista-profesionales" style="display:none">
+    <div class="toolbar">
+      <select id="f-gremio" onchange="renderProfesionales()">
+        <option value="">Todos los gremios</option>
+      </select>
+    </div>
+    <div class="tabla-wrap">
+      <table>
+        <thead><tr><th>Profesional</th><th>Gremio</th><th>Verificado</th><th>Provenza Pro</th><th>Stripe</th><th>Comisión pendiente</th><th>Valoración</th><th>Estado</th><th></th></tr></thead>
+        <tbody id="f-tbody"><tr><td colspan="9" class="vacio">Cargando…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script>
+const API = location.origin;
+let token = sessionStorage.getItem('admin_token') || '';
+
+function h(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+async function api(ruta, opts = {}) {
+  const res = await fetch(API + ruta, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token, ...(opts.headers || {}) },
+  });
+  if (res.status === 401) { salir(); throw new Error('sesión caducada'); }
+  if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.detail || res.status); }
+  return res.json();
+}
+
+async function entrar() {
+  const email = document.getElementById('l-email').value.trim();
+  const pass = document.getElementById('l-pass').value;
+  const err = document.getElementById('l-error');
+  err.textContent = '';
+  try {
+    const res = await fetch(API + '/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password: pass }),
+    });
+    const data = await res.json();
+    if (!res.ok) { err.textContent = data.detail || 'Error al entrar'; return; }
+    if (data.tipo_usuario !== 'admin') { err.textContent = 'Esta cuenta no es de administrador'; return; }
+    token = data.access_token;
+    sessionStorage.setItem('admin_token', token);
+    mostrarApp();
+  } catch (e) { err.textContent = 'No se pudo conectar con el servidor'; }
+}
+document.getElementById('l-pass').addEventListener('keydown', e => { if (e.key === 'Enter') entrar(); });
+
+function salir() {
+  token = ''; sessionStorage.removeItem('admin_token');
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('login').style.display = 'block';
+}
+
+function mostrarApp() {
+  document.getElementById('login').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  cargarResumen(); cargarUsuarios(); cargarProfesionales();
+}
+
+function verTab(nombre) {
+  for (const t of ['resumen', 'usuarios', 'profesionales']) {
+    document.getElementById('vista-' + t).style.display = t === nombre ? 'block' : 'none';
+    document.getElementById('tab-' + t).classList.toggle('activo', t === nombre);
+  }
+}
+
+const EUR = new Intl.NumberFormat('es-ES', { style: 'currency', currency: 'EUR' });
+
+async function cargarResumen() {
+  try {
+    const s = await api('/admin/estadisticas');
+    const tiles = [
+      ['Usuarios', s.total_usuarios, s.usuarios_nuevos_7d + ' nuevos esta semana'],
+      ['Clientes', s.total_clientes, ''],
+      ['Profesionales', s.total_fontaneros, ''],
+      ['Servicios', s.total_servicios, s.servicios_7d + ' esta semana'],
+      ['Pendientes ahora', s.servicios_pendientes, ''],
+      ['Completados', s.servicios_completados, ''],
+      ['Dinero movido', EUR.format(s.dinero_movido || 0), 'total pagado por la app'],
+      ['Ingresos (5%)', EUR.format(s.ingresos_plataforma || 0), 'comisión de pagos por la app'],
+      ['Comisión por cobrar', EUR.format(s.comisiones_pendientes || 0), 'de pagos en efectivo/Bizum'],
+      ['Usuarios vetados', s.usuarios_bloqueados, ''],
+    ];
+    document.getElementById('tiles').innerHTML = tiles.map(([l, v, sub]) =>
+      `<div class="tile"><div class="label">${h(l)}</div><div class="valor">${h(v)}</div>${sub ? `<div class="sub">${h(sub)}</div>` : ''}</div>`
+    ).join('');
+    const g = s.por_gremio || {};
+    const claves = Object.keys(g);
+    if (claves.length) {
+      document.getElementById('gremios').style.display = 'block';
+      document.getElementById('gremios-lista').innerHTML = claves.map(k =>
+        `<li><span>${h(k)}:</span> ${h(g[k])}</li>`).join('');
+    }
+  } catch (e) { console.error(e); }
+}
+
+let debounceT = null;
+function filtrarUsuariosDebounce() { clearTimeout(debounceT); debounceT = setTimeout(cargarUsuarios, 350); }
+
+async function cargarUsuarios() {
+  const buscar = document.getElementById('u-buscar').value.trim();
+  const tipo = document.getElementById('u-tipo').value;
+  const params = new URLSearchParams();
+  if (buscar) params.set('buscar', buscar);
+  if (tipo) params.set('tipo', tipo);
+  const tbody = document.getElementById('u-tbody');
+  try {
+    const usuarios = await api('/admin/usuarios?' + params);
+    if (!usuarios.length) { tbody.innerHTML = '<tr><td colspan="6" class="vacio">Sin resultados</td></tr>'; return; }
+    tbody.innerHTML = usuarios.map(u => {
+      const tipoTxt = u.tipo === 'fontanero' ? 'Profesional' : u.tipo === 'admin' ? 'Admin' : 'Cliente';
+      const verif = [
+        u.email_verificado ? '<span class="pill good">✓ email</span>' : '<span class="pill neutro">— email</span>',
+        u.telefono_verificado ? '<span class="pill good">✓ tel</span>' : '<span class="pill neutro">— tel</span>',
+      ].join(' ');
+      const estado = u.bloqueado ? '<span class="pill crit">⛔ Vetado</span>' : '<span class="pill good">✓ Activo</span>';
+      const fecha = u.creado_en ? new Date(u.creado_en).toLocaleDateString('es-ES') : '—';
+      const boton = u.tipo === 'admin' ? '' : (u.bloqueado
+        ? `<button class="btn small" onclick="vetar(${u.id}, false)">Quitar veto</button>`
+        : `<button class="btn small danger" onclick="vetar(${u.id}, true)">Vetar</button>`);
+      return `<tr><td>${h(u.nombre)}<div class="sub">${h(u.email)}</div></td><td>${tipoTxt}</td><td>${verif}</td><td>${estado}</td><td>${fecha}</td><td>${boton}</td></tr>`;
+    }).join('');
+  } catch (e) { tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error: ${h(e.message)}</td></tr>`; }
+}
+
+async function vetar(id, bloquear) {
+  const msg = bloquear
+    ? '¿Vetar a este usuario? No podrá volver a iniciar sesión y, si es profesional, desaparecerá del mapa.'
+    : '¿Quitar el veto a este usuario?';
+  if (!confirm(msg)) return;
+  try {
+    await api(`/admin/usuarios/${id}/bloquear`, { method: 'PUT', body: JSON.stringify({ bloqueado: bloquear }) });
+    cargarUsuarios(); cargarProfesionales(); cargarResumen();
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+let _profesionales = [];
+
+async function cargarProfesionales() {
+  const tbody = document.getElementById('f-tbody');
+  try {
+    _profesionales = await api('/admin/fontaneros');
+    const gremios = [...new Set(_profesionales.map(f => f.gremio).filter(Boolean))].sort();
+    const select = document.getElementById('f-gremio');
+    const actual = select.value;
+    select.innerHTML = '<option value="">Todos los gremios</option>' +
+      gremios.map(g => `<option value="${h(g)}">${h(g)}</option>`).join('');
+    select.value = gremios.includes(actual) ? actual : '';
+    renderProfesionales();
+  } catch (e) { tbody.innerHTML = `<tr><td colspan="8" class="vacio">Error: ${h(e.message)}</td></tr>`; }
+}
+
+function renderProfesionales() {
+  const tbody = document.getElementById('f-tbody');
+  const gremio = document.getElementById('f-gremio').value;
+  const lista = gremio ? _profesionales.filter(f => f.gremio === gremio) : _profesionales;
+  if (!lista.length) { tbody.innerHTML = '<tr><td colspan="9" class="vacio">No hay profesionales que coincidan</td></tr>'; return; }
+  tbody.innerHTML = lista.map(f => {
+    const verif = f.verificado
+      ? '<span class="pill good">✓ Verificado</span>'
+      : `<button class="btn small primary" onclick="verificar(${f.id})">Verificar</button>`;
+    const pro = f.certificado_pro
+      ? `<span class="pill good">🏅 Pro</span> <button class="btn small" onclick="certificarPro(${f.id}, false)">Quitar</button>`
+      : `<button class="btn small primary" onclick="certificarPro(${f.id}, true)">Certificar Pro</button>`;
+    const stripe = f.stripe_conectado ? '<span class="pill good">✓ Conectado</span>' : '<span class="pill neutro">— No</span>';
+    const comision = f.comision_pendiente > 0
+      ? `<span class="pill warn">⏳ ${EUR.format(f.comision_pendiente)}</span>` : '<span class="pill neutro">0 €</span>';
+    const estado = f.bloqueado ? '<span class="pill crit">⛔ Vetado</span>'
+      : (f.disponible ? '<span class="pill good">✓ Disponible</span>' : '<span class="pill neutro">— Inactivo</span>');
+    const boton = f.usuario_id ? (f.bloqueado
+      ? `<button class="btn small" onclick="vetar(${f.usuario_id}, false)">Quitar veto</button>`
+      : `<button class="btn small danger" onclick="vetar(${f.usuario_id}, true)">Vetar</button>`) : '';
+    return `<tr><td>${h(f.nombre)}<div class="sub">${h(f.email || '')}</div></td><td>${h(f.gremio)}</td><td>${verif}</td><td>${pro}</td><td>${stripe}</td><td>${comision}</td><td>${f.valoracion ? '★ ' + f.valoracion : '—'}</td><td>${estado}</td><td>${boton}</td></tr>`;
+  }).join('');
+}
+
+async function verificar(fontaneroId) {
+  if (!confirm('¿Marcar a este profesional como verificado?')) return;
+  try {
+    await api(`/admin/fontaneros/${fontaneroId}/verificar`, { method: 'PUT' });
+    cargarProfesionales();
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function certificarPro(fontaneroId, certificar) {
+  const msg = certificar ? '¿Certificar a este profesional como Provenza Pro?' : '¿Quitar la certificación Provenza Pro?';
+  if (!confirm(msg)) return;
+  try {
+    await api(`/admin/fontaneros/${fontaneroId}/certificar-pro?certificar=${certificar}`, { method: 'PUT' });
+    cargarProfesionales();
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+if (token) mostrarApp();
+</script>
+</body>
+</html>
