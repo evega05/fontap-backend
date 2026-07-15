@@ -3312,14 +3312,23 @@ def confirmar_stripe(
     db.commit()
     return {"mensaje": "Pago confirmado", "precio": servicio.precio, "comision": comision}
 
+class StripeCheckoutDatos(BaseModel):
+    metodo: str = "card"  # "card" o "bizum" — ambos se cobran de verdad vía Stripe
+
 @app.post("/servicios/{servicio_id}/stripe/crear-checkout")
 def crear_stripe_checkout(
     servicio_id: int,
+    datos: StripeCheckoutDatos = StripeCheckoutDatos(),
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
     """Pago real vía la página alojada de Stripe (Checkout): no requiere SDK nativo,
-    así que funciona con Expo Go — el navegador se abre con expo-web-browser."""
+    así que funciona con Expo Go — el navegador se abre con expo-web-browser.
+    Bizum también se cobra de verdad (Stripe lo soporta como método de pago local
+    en España): redirige al cliente a autorizarlo desde su propio banco, y se
+    verifica con Stripe igual que la tarjeta — nunca nos fiamos de que el cliente
+    'diga' que ya pagó."""
+    metodo_stripe = datos.metodo if datos.metodo in ("card", "bizum") else "card"
     if not STRIPE_SECRET_KEY:
         raise HTTPException(status_code=501, detail="Stripe no configurado. Añade STRIPE_SECRET_KEY en variables de entorno.")
     try:
@@ -3356,7 +3365,7 @@ def crear_stripe_checkout(
 
     checkout_kwargs = dict(
         mode="payment",
-        automatic_payment_methods={"enabled": True},
+        payment_method_types=[metodo_stripe],
         line_items=[{
             "price_data": {
                 "currency": "eur",
@@ -3365,7 +3374,7 @@ def crear_stripe_checkout(
             },
             "quantity": 1,
         }],
-        metadata={"servicio_id": str(servicio_id)},
+        metadata={"servicio_id": str(servicio_id), "metodo": metodo_stripe},
         success_url=f"{os.getenv('BACKEND_URL', 'https://fontap-backend-production.up.railway.app')}/pago-resultado?estado=ok",
         cancel_url=f"{os.getenv('BACKEND_URL', 'https://fontap-backend-production.up.railway.app')}/pago-resultado?estado=cancelado",
         payment_intent_data={
@@ -3373,7 +3382,12 @@ def crear_stripe_checkout(
             "transfer_data": {"destination": fontanero_obj.stripe_account_id},
         },
     )
-    session = stripe.checkout.Session.create(**checkout_kwargs)
+    try:
+        session = stripe.checkout.Session.create(**checkout_kwargs)
+    except Exception as e:
+        if metodo_stripe == "bizum":
+            raise HTTPException(status_code=400, detail="Bizum no está disponible ahora mismo para este pago. Prueba con tarjeta o efectivo mientras tanto.")
+        raise HTTPException(status_code=400, detail="No se pudo iniciar el pago con tarjeta. Inténtalo de nuevo.")
     servicio.stripe_payment_intent = session.id
     db.commit()
     return {"checkout_url": session.url, "session_id": session.id}
@@ -3399,7 +3413,7 @@ def verificar_stripe_checkout(
     ya_pagado = servicio.estado == "pagado"
     if session.payment_status == "paid" and not ya_pagado:
         servicio.estado = "pagado"
-        servicio.metodo_pago = "stripe"
+        servicio.metodo_pago = "bizum" if (session.metadata or {}).get("metodo") == "bizum" else "tarjeta"
         fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
         comision = round((servicio.precio or 0) * _tasa_comision(fontanero_obj), 2)
         servicio.comision_aplicada = comision
@@ -3565,31 +3579,6 @@ def verificar_comision_pendiente(
         fontanero.comision_checkout_session = None
         db.commit()
     return {"liquidada": session.payment_status == "paid"}
-
-# ─── BIZUM ────────────────────────────────────────────────────────────────────
-
-@app.get("/servicios/{servicio_id}/bizum/instrucciones")
-def instrucciones_bizum(
-    servicio_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(auth.get_current_user),
-):
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio or not servicio.precio:
-        raise HTTPException(status_code=400, detail="Servicio no encontrado o sin precio")
-    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
-    usuario_fontanero = db.query(models.Usuario).filter(models.Usuario.id == fontanero_obj.usuario_id).first() if fontanero_obj else None
-    return {
-        "importe": servicio.precio,
-        "concepto": f"Multiservicios Provenza servicio #{servicio_id}",
-        "telefono_destino": usuario_fontanero.telefono if usuario_fontanero else "Consultar con el profesional",
-        "instrucciones": [
-            f"1. Abre tu app bancaria y selecciona Bizum",
-            f"2. Envía {servicio.precio}€ al teléfono del profesional",
-            f"3. Añade el concepto: Multiservicios Provenza servicio #{servicio_id}",
-            f"4. Vuelve a la app y confirma el pago",
-        ],
-    }
 
 # ─── INMUEBLES (ADMIN FINCAS) ─────────────────────────────────────────────────
 
