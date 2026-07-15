@@ -76,6 +76,10 @@ def _migrar_columnas_faltantes():
             "comision_liquidada": "BOOLEAN DEFAULT TRUE",
             "gremio": "VARCHAR",
             "google_event_id": "VARCHAR",
+            "urgencia_ia": "VARCHAR",
+            "eta_minutos": "INTEGER",
+            "comision_aplicada": "FLOAT",
+            "stripe_payment_intent": "VARCHAR",
         },
         "citas": {
             "recordatorio_24h": "BOOLEAN DEFAULT FALSE",
@@ -1429,10 +1433,12 @@ def confirmar_efectivo(
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
+    if not fontanero_obj or servicio.fontanero_id != fontanero_obj.id:
+        raise HTTPException(status_code=403, detail="Solo el fontanero asignado puede confirmar el pago en efectivo")
     servicio.estado = "pagado"
     # El efectivo va directo cliente→fontanero: la comisión de Multiservicios Provenza queda
     # pendiente de que el fontanero la liquide (ver /comision-pendiente).
-    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
     servicio.comision_aplicada = round((servicio.precio or 0) * _tasa_comision(fontanero_obj), 2)
     servicio.comision_liquidada = False
     _consumir_trabajo_gratis(fontanero_obj)
