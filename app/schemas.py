@@ -77,6 +77,15 @@ class FontaneroActualizar(BaseModel):
     disponible_24h: Optional[bool] = None
     gremio: Optional[str] = None
 
+class AdminFontaneroEditar(BaseModel):
+    nombre: Optional[str] = None
+    telefono: Optional[str] = None
+    zona: Optional[str] = None
+    valoracion: Optional[float] = None
+    num_trabajos: Optional[int] = None
+    disponible: Optional[bool] = None
+    verificado: Optional[bool] = None
+
 class UbicacionActualizar(BaseModel):
     latitud: float
     longitud: float
