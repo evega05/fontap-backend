@@ -3335,6 +3335,23 @@ def crear_stripe_checkout(
         raise HTTPException(status_code=403, detail="Solo el cliente puede pagar este servicio")
 
     fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
+
+    # El pago con tarjeta reparte el dinero automáticamente al profesional (menos la
+    # comisión) vía Stripe Connect. Si no tiene cuenta conectada y activa, el dinero
+    # se quedaría en la cuenta de Multiservicios Provenza sin ninguna forma automática
+    # de llegarle, así que no se permite cobrar por tarjeta hasta que la conecte.
+    if not fontanero_obj or not fontanero_obj.stripe_account_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Este profesional todavía no ha conectado su cuenta de cobro. Pídele que pulse \"Conectar\" en su panel, o paga en efectivo/Bizum mientras tanto.",
+        )
+    cuenta_stripe = stripe.Account.retrieve(fontanero_obj.stripe_account_id)
+    if not cuenta_stripe.charges_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Este profesional está terminando de configurar su cuenta de cobro. Prueba de nuevo en unos minutos, o paga en efectivo/Bizum mientras tanto.",
+        )
+
     comision_centavos = round(servicio.precio * 100 * _tasa_comision(fontanero_obj))
 
     checkout_kwargs = dict(
@@ -3351,14 +3368,11 @@ def crear_stripe_checkout(
         metadata={"servicio_id": str(servicio_id)},
         success_url=f"{os.getenv('BACKEND_URL', 'https://fontap-backend-production.up.railway.app')}/pago-resultado?estado=ok",
         cancel_url=f"{os.getenv('BACKEND_URL', 'https://fontap-backend-production.up.railway.app')}/pago-resultado?estado=cancelado",
-    )
-    # Si el fontanero ya conectó su cuenta de Stripe, repartimos automático:
-    # la comisión se queda en Multiservicios Provenza, el resto va directo a su cuenta.
-    if fontanero_obj and fontanero_obj.stripe_account_id:
-        checkout_kwargs["payment_intent_data"] = {
+        payment_intent_data={
             "application_fee_amount": comision_centavos,
             "transfer_data": {"destination": fontanero_obj.stripe_account_id},
-        }
+        },
+    )
     session = stripe.checkout.Session.create(**checkout_kwargs)
     servicio.stripe_payment_intent = session.id
     db.commit()
