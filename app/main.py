@@ -2908,27 +2908,51 @@ def ver_ruta_hoy(
     current_user: dict = Depends(auth.get_current_user),
 ):
     """Citas de hoy ordenadas por cercanía geográfica, empezando desde la posición
-    actual del profesional (algoritmo del vecino más cercano)."""
+    actual del profesional (algoritmo del vecino más cercano). Junta tanto las citas
+    del calendario interno como los servicios con fecha programada para hoy."""
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
     hoy = datetime.datetime.utcnow().date()
+
+    pendientes = []
+    vistos_servicio_id = set()
+
     citas_hoy = db.query(models.Cita).filter(
         models.Cita.fontanero_id == fontanero.id,
         func.date(models.Cita.fecha_inicio) == hoy,
     ).all()
-
-    pendientes = []
     for cita in citas_hoy:
         servicio = db.query(models.Servicio).filter(models.Servicio.id == cita.servicio_id).first() if cita.servicio_id else None
         pendientes.append({
-            "id": cita.id,
+            "id": f"cita-{cita.id}",
             "titulo": cita.titulo,
             "fecha_inicio": cita.fecha_inicio,
             "servicio_id": cita.servicio_id,
             "latitud": servicio.latitud_cliente if servicio else None,
             "longitud": servicio.longitud_cliente if servicio else None,
             "tiene_ubicacion": bool(servicio and servicio.latitud_cliente is not None),
+        })
+        if cita.servicio_id:
+            vistos_servicio_id.add(cita.servicio_id)
+
+    servicios_hoy = db.query(models.Servicio).filter(
+        models.Servicio.fontanero_id == fontanero.id,
+        models.Servicio.estado.in_(["aceptado", "precio_enviado", "pago_pendiente", "en_camino"]),
+        models.Servicio.fecha != None,
+        func.date(models.Servicio.fecha) == hoy,
+    ).all()
+    for servicio in servicios_hoy:
+        if servicio.id in vistos_servicio_id:
+            continue
+        pendientes.append({
+            "id": f"servicio-{servicio.id}",
+            "titulo": servicio.tipo,
+            "fecha_inicio": servicio.fecha,
+            "servicio_id": servicio.id,
+            "latitud": servicio.latitud_cliente,
+            "longitud": servicio.longitud_cliente,
+            "tiene_ubicacion": servicio.latitud_cliente is not None,
         })
 
     con_ubicacion = [c for c in pendientes if c["tiene_ubicacion"]]
