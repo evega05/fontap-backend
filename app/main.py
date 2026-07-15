@@ -818,20 +818,9 @@ def cambiar_password(
     db.commit()
     return {"mensaje": "Contraseña actualizada"}
 
-@app.delete("/usuarios/{usuario_id}")
-def eliminar_cuenta(
-    usuario_id: int,
-    current_user: dict = Depends(auth.get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Elimina la cuenta propia: borra los datos personales y anonimiza el historial
-    (los servicios y reseñas se conservan sin datos identificativos, RGPD)."""
-    if current_user["id"] != usuario_id:
-        raise HTTPException(status_code=403, detail="No puedes eliminar otra cuenta")
-    usuario = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
-    if not usuario:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-
+def _anonimizar_usuario(db: Session, usuario_id: int, usuario) -> None:
+    """Borra los datos personales y anonimiza el historial (los servicios y reseñas
+    se conservan sin datos identificativos, RGPD). No hace commit: lo hace el caller."""
     db.query(models.TokenPush).filter(models.TokenPush.usuario_id == usuario_id).delete()
     db.query(models.Notificacion).filter(models.Notificacion.usuario_id == usuario_id).delete()
     db.query(models.Favorito).filter(models.Favorito.cliente_id == usuario_id).delete()
@@ -854,6 +843,21 @@ def eliminar_cuenta(
     usuario.telefono = ""
     usuario.password_hash = auth.hashear_password(secrets.token_hex(16))
     usuario.email_verificado = False
+
+
+@app.delete("/usuarios/{usuario_id}")
+def eliminar_cuenta(
+    usuario_id: int,
+    current_user: dict = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Elimina la cuenta propia."""
+    if current_user["id"] != usuario_id:
+        raise HTTPException(status_code=403, detail="No puedes eliminar otra cuenta")
+    usuario = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    _anonimizar_usuario(db, usuario_id, usuario)
     db.commit()
     return {"mensaje": "Cuenta eliminada"}
 
@@ -3267,6 +3271,25 @@ def admin_bloquear_usuario(
     db.commit()
     return {"mensaje": "Usuario vetado" if datos.bloqueado else "Usuario desvetado", "bloqueado": usuario.bloqueado}
 
+@app.delete("/admin/usuarios/{usuario_id}")
+def admin_eliminar_usuario(
+    usuario_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """A diferencia de vetar (reversible, solo oculta), esto borra los datos
+    personales del usuario de forma permanente (misma anonimización RGPD que
+    cuando un usuario elimina su propia cuenta)."""
+    _verificar_admin(current_user)
+    usuario = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    if usuario.tipo == "admin":
+        raise HTTPException(status_code=400, detail="No puedes eliminar a otro administrador")
+    _anonimizar_usuario(db, usuario_id, usuario)
+    db.commit()
+    return {"mensaje": "Usuario eliminado"}
+
 @app.get("/admin/fontaneros")
 def admin_listar_fontaneros(
     db: Session = Depends(get_db),
@@ -3286,6 +3309,8 @@ def admin_listar_fontaneros(
             "id": f.id,
             "usuario_id": f.usuario_id,
             "nombre": f.nombre,
+            "telefono": f.telefono,
+            "zona": f.zona,
             "email": usuario.email if usuario else None,
             "gremio": f.gremio or "fontanero",
             "verificado": f.verificado,
@@ -3346,6 +3371,24 @@ def admin_certificar_pro(
                              "Tu perfil ha sido certificado como profesional Provenza Pro", "certificacion_pro", fontanero_id)
     db.commit()
     return {"mensaje": "Certificado Provenza Pro actualizado" if certificar else "Certificación Provenza Pro retirada"}
+
+@app.put("/admin/fontaneros/{fontanero_id}/editar")
+def admin_editar_fontanero(
+    fontanero_id: int,
+    datos: schemas.AdminFontaneroEditar,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Edición manual de un profesional desde el panel de administración
+    (valoración, nombre, teléfono, zona, trabajos, disponibilidad)."""
+    _verificar_admin(current_user)
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    for campo, valor in datos.model_dump(exclude_unset=True).items():
+        setattr(fontanero, campo, valor)
+    db.commit()
+    return {"mensaje": "Profesional actualizado"}
 
 @app.put("/admin/documentos/{doc_id}/revisar")
 def admin_revisar_documento(
