@@ -119,6 +119,9 @@ class ServicioCrear(BaseModel):
     fecha: Optional[datetime.datetime] = None
     fontanero_id: Optional[int] = None
     gremio: Optional[str] = None
+    ciudad: Optional[str] = None
+    latitud_cliente: Optional[float] = None
+    longitud_cliente: Optional[float] = None
 
 ESTADO_COLORES = {
     "pendiente": "#D97706",

@@ -61,6 +61,11 @@ class Servicio(Base):
     urgente = Column(Boolean, default=False)
     urgencia_ia = Column(String, nullable=True)  # baja, media, alta, critica
     gremio = Column(String, nullable=True)  # ver GREMIOS_VALIDOS en main.py
+    ciudad = Column(String, nullable=True)
+    radio_ampliado = Column(Boolean, default=False)  # si ya se avisó a fontaneros fuera de la ciudad del cliente
+    latitud_cliente = Column(Float, nullable=True)
+    longitud_cliente = Column(Float, nullable=True)
+    aviso_proximidad_enviado = Column(Boolean, default=False)
     estado = Column(String, default="pendiente")
     precio = Column(Float, nullable=True)
     metodo_pago = Column(String, nullable=True)
@@ -283,4 +288,30 @@ class DocumentoVerificacion(Base):
     tipo = Column(String)  # dni, carnet_profesional, seguro
     url = Column(String)
     estado = Column(String, default="pendiente")  # pendiente, verificado, rechazado
+    creado_en = Column(DateTime, default=utcnow)
+
+class AuditoriaServicio(Base):
+    __tablename__ = "auditoria_servicios"
+    id = Column(Integer, primary_key=True, index=True)
+    servicio_id = Column(Integer, ForeignKey("servicios.id"))
+    campo = Column(String)  # precio, estado
+    valor_anterior = Column(String, nullable=True)
+    valor_nuevo = Column(String, nullable=True)
+    cambiado_por_id = Column(Integer, ForeignKey("usuarios.id"), nullable=True)
+    cambiado_por_tipo = Column(String, nullable=True)  # cliente, fontanero, sistema
+    creado_en = Column(DateTime, default=utcnow)
+
+class AlertaAdmin(Base):
+    __tablename__ = "alertas_admin"
+    id = Column(Integer, primary_key=True, index=True)
+    tipo = Column(String)  # cancelaciones_repetidas, resenas_bajas
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"), nullable=True)
+    mensaje = Column(Text)
+    creado_en = Column(DateTime, default=utcnow)
+
+class ListaNegraCliente(Base):
+    __tablename__ = "lista_negra_cliente"
+    id = Column(Integer, primary_key=True, index=True)
+    cliente_id = Column(Integer, ForeignKey("usuarios.id"))
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
     creado_en = Column(DateTime, default=utcnow)
