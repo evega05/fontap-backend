@@ -426,7 +426,8 @@ def robots_txt():
     return Response(content=txt, media_type="text/plain")
 
 @app.post("/migrar-db")
-def migrar_db():
+def migrar_db(current_user: dict = Depends(auth.get_current_user)):
+    _verificar_admin(current_user)
     from .database import engine
     from sqlalchemy import text
     columnas = [
@@ -843,6 +844,10 @@ def _anonimizar_usuario(db: Session, usuario_id: int, usuario) -> None:
     usuario.telefono = ""
     usuario.password_hash = auth.hashear_password(secrets.token_hex(16))
     usuario.email_verificado = False
+    # Revoca cualquier JWT ya emitido para esta cuenta (get_current_user comprueba
+    # este flag en cada request): sin esto, una sesión ya iniciada seguiría
+    # funcionando hasta 7 días después de "eliminada" la cuenta.
+    usuario.bloqueado = True
 
 
 @app.delete("/usuarios/{usuario_id}")
@@ -2669,6 +2674,17 @@ def google_calendar_conectar(
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
         raise HTTPException(status_code=400, detail="Google Calendar no está configurado en el servidor")
     from urllib.parse import urlencode
+    # Token de estado aleatorio ligado al usuario que inicia el flujo: el callback
+    # nunca debe confiar en un usuario_id que llega directo por query string (eso
+    # permitiría a un atacante completar su propio consentimiento de Google y
+    # enlazar su refresh_token a la cuenta de otro profesional). Igual que
+    # VerificacionEmail/PasswordReset: token corto de un solo uso con caducidad.
+    state_token = secrets.token_urlsafe(24)
+    db.add(models.EstadoOAuth(
+        usuario_id=current_user["id"], token=state_token,
+        expira=datetime.datetime.utcnow() + datetime.timedelta(minutes=10),
+    ))
+    db.commit()
     params = {
         "client_id": GOOGLE_CLIENT_ID,
         "redirect_uri": _google_calendar_redirect_uri(),
@@ -2676,7 +2692,7 @@ def google_calendar_conectar(
         "access_type": "offline",
         "prompt": "consent",
         "scope": "https://www.googleapis.com/auth/calendar.events",
-        "state": str(fontanero_id),
+        "state": state_token,
     }
     return {"url": f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"}
 
@@ -2693,7 +2709,15 @@ def google_calendar_callback(code: Optional[str] = None, state: Optional[str] = 
 
     if error or not code or not state:
         return _pagina("❌ No se pudo conectar Google Calendar")
-    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == int(state)).first()
+    estado = db.query(models.EstadoOAuth).filter(
+        models.EstadoOAuth.token == state,
+        models.EstadoOAuth.usado == False,
+    ).order_by(models.EstadoOAuth.id.desc()).first()
+    if not estado or estado.expira < datetime.datetime.utcnow():
+        return _pagina("❌ El enlace de conexión caducó o no es válido. Vuelve a intentarlo desde la app")
+    estado.usado = True
+    db.commit()
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == estado.usuario_id).first()
     if not fontanero:
         return _pagina("❌ Profesional no encontrado")
     try:

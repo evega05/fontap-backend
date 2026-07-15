@@ -223,6 +223,18 @@ class PasswordReset(Base):
     usado = Column(Boolean, default=False)
     creado_en = Column(DateTime, default=utcnow)
 
+class EstadoOAuth(Base):
+    """Token de 'state' de un flujo OAuth (ej. Google Calendar) ligado al usuario
+    que lo inició, para que el callback nunca tenga que confiar en un usuario_id
+    que llega directo por query string (protección CSRF del flujo OAuth)."""
+    __tablename__ = "estados_oauth"
+    id = Column(Integer, primary_key=True, index=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    token = Column(String, index=True, unique=True)
+    expira = Column(DateTime)
+    usado = Column(Boolean, default=False)
+    creado_en = Column(DateTime, default=utcnow)
+
 class Cita(Base):
     __tablename__ = "citas"
     id = Column(Integer, primary_key=True, index=True)

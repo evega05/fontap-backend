@@ -4,6 +4,10 @@ from jose import JWTError, jwt
 import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+
+from . import models
+from .database import get_db
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "fontap_dev_secret_key_cambia_en_produccion")
 ALGORITHM = "HS256"
@@ -34,7 +38,7 @@ def verificar_token(token: str):
     except JWTError:
         return None
 
-def get_current_user(token: str = Depends(oauth2_scheme)):
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     payload = verificar_token(token)
     if payload is None:
         raise HTTPException(
@@ -42,4 +46,16 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
             detail="Token inválido o expirado",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    # El JWT en sí no se puede revocar, pero comprobamos el estado actual en BD en
+    # cada request: así, si un admin veta o elimina la cuenta después de emitido
+    # el token, deja de servir aunque todavía no haya caducado (hasta 7 días).
+    usuario_id = payload.get("id")
+    if usuario_id is not None:
+        usuario = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
+        if usuario is None or usuario.bloqueado:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token inválido o expirado",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
     return payload
