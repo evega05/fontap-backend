@@ -1233,6 +1233,7 @@ def ver_solicitudes_fontanero(
             "estado": s.estado,
             "estado_color": schemas.ESTADO_COLORES.get(s.estado, "#D97706"),
             "precio": s.precio,
+            "metodo_pago": s.metodo_pago,
             "fecha": str(s.fecha) if s.fecha else None,
             "cliente_nombre": cliente.nombre if cliente else "Cliente",
             "zona": "Bilbao",
@@ -1623,21 +1624,46 @@ def confirmar_pago(
         raise HTTPException(status_code=403, detail="Solo el cliente puede confirmar el pago de este servicio")
     if not servicio.precio:
         raise HTTPException(status_code=400, detail="El fontanero aún no ha enviado el precio")
-    nuevo_estado = "pago_pendiente" if datos.metodo == "efectivo" else "pagado"
+    # Efectivo y Bizum van directo cliente→fontanero, sin que la app pueda comprobar
+    # que el dinero llegó de verdad: se quedan "pendientes" hasta que el propio
+    # fontanero confirme que lo recibió (ver /confirmar_efectivo y /confirmar_bizum).
+    nuevo_estado = "pago_pendiente" if datos.metodo in ("efectivo", "bizum") else "pagado"
     _registrar_auditoria(db, servicio.id, "estado", servicio.estado, nuevo_estado, current_user)
     servicio.estado = nuevo_estado
     servicio.metodo_pago = datos.metodo
     fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
-    if datos.metodo not in ["efectivo", "stripe"]:
-        # El dinero (ej. Bizum) va directo cliente→fontanero, sin pasar por Multiservicios Provenza:
-        # queda pendiente que el fontanero liquide la comisión de la plataforma.
+    if datos.metodo not in ["efectivo", "bizum", "stripe"]:
         servicio.comision_aplicada = round(servicio.precio * _tasa_comision(fontanero_obj), 2)
         servicio.comision_liquidada = False
         _consumir_trabajo_gratis(fontanero_obj)
     if fontanero_obj and fontanero_obj.usuario_id:
-        _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido", f"El cliente ha confirmado el pago de {servicio.precio}€ via {datos.metodo}", "pago_recibido", servicio.id)
+        if datos.metodo == "bizum":
+            _crear_notificacion(db, fontanero_obj.usuario_id, "📱 ¿Has recibido el Bizum?",
+                                 f"El cliente dice haber pagado {servicio.precio}€ por Bizum. Confírmalo en la app en cuanto lo compruebes.",
+                                 "bizum_pendiente", servicio.id)
+        else:
+            _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido", f"El cliente ha confirmado el pago de {servicio.precio}€ via {datos.metodo}", "pago_recibido", servicio.id)
     db.commit()
     return {"mensaje": "Pago registrado", "precio": servicio.precio, "metodo": datos.metodo}
+
+def _confirmar_pago_directo(db: Session, servicio_id: int, current_user: dict, etiqueta: str):
+    """Lógica compartida por /confirmar_efectivo y /confirmar_bizum: el fontanero
+    confirma que recibió el dinero directamente del cliente (sin pasar por Stripe),
+    así que la comisión de Multiservicios Provenza queda pendiente de liquidar."""
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
+    if not fontanero or servicio.fontanero_id != fontanero.id:
+        raise HTTPException(status_code=403, detail="Este servicio no es tuyo")
+    _registrar_auditoria(db, servicio.id, "estado", servicio.estado, "pagado", current_user)
+    servicio.estado = "pagado"
+    servicio.comision_aplicada = round((servicio.precio or 0) * _tasa_comision(fontanero), 2)
+    servicio.comision_liquidada = False
+    _consumir_trabajo_gratis(fontanero)
+    _crear_notificacion(db, servicio.cliente_id, "Pago confirmado", f"El profesional confirmó haber recibido tu pago en {etiqueta}", "pago_confirmado", servicio_id)
+    db.commit()
+    return {"mensaje": f"{etiqueta} confirmado"}
 
 @app.put("/servicios/{servicio_id}/confirmar_efectivo")
 def confirmar_efectivo(
@@ -1645,18 +1671,15 @@ def confirmar_efectivo(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio:
-        raise HTTPException(status_code=404, detail="Servicio no encontrado")
-    servicio.estado = "pagado"
-    # El efectivo va directo cliente→fontanero: la comisión de Multiservicios Provenza queda
-    # pendiente de que el fontanero la liquide (ver /comision-pendiente).
-    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
-    servicio.comision_aplicada = round((servicio.precio or 0) * _tasa_comision(fontanero_obj), 2)
-    servicio.comision_liquidada = False
-    _consumir_trabajo_gratis(fontanero_obj)
-    db.commit()
-    return {"mensaje": "Efectivo confirmado"}
+    return _confirmar_pago_directo(db, servicio_id, current_user, "efectivo")
+
+@app.put("/servicios/{servicio_id}/confirmar_bizum")
+def confirmar_bizum(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    return _confirmar_pago_directo(db, servicio_id, current_user, "Bizum")
 
 @app.put("/servicios/{servicio_id}/cancelar")
 def cancelar_servicio(
@@ -3312,23 +3335,14 @@ def confirmar_stripe(
     db.commit()
     return {"mensaje": "Pago confirmado", "precio": servicio.precio, "comision": comision}
 
-class StripeCheckoutDatos(BaseModel):
-    metodo: str = "card"  # "card" o "bizum" — ambos se cobran de verdad vía Stripe
-
 @app.post("/servicios/{servicio_id}/stripe/crear-checkout")
 def crear_stripe_checkout(
     servicio_id: int,
-    datos: StripeCheckoutDatos = StripeCheckoutDatos(),
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
     """Pago real vía la página alojada de Stripe (Checkout): no requiere SDK nativo,
-    así que funciona con Expo Go — el navegador se abre con expo-web-browser.
-    Bizum también se cobra de verdad (Stripe lo soporta como método de pago local
-    en España): redirige al cliente a autorizarlo desde su propio banco, y se
-    verifica con Stripe igual que la tarjeta — nunca nos fiamos de que el cliente
-    'diga' que ya pagó."""
-    metodo_stripe = datos.metodo if datos.metodo in ("card", "bizum") else "card"
+    así que funciona con Expo Go — el navegador se abre con expo-web-browser."""
     if not STRIPE_SECRET_KEY:
         raise HTTPException(status_code=501, detail="Stripe no configurado. Añade STRIPE_SECRET_KEY en variables de entorno.")
     try:
@@ -3365,7 +3379,7 @@ def crear_stripe_checkout(
 
     checkout_kwargs = dict(
         mode="payment",
-        payment_method_types=[metodo_stripe],
+        automatic_payment_methods={"enabled": True},
         line_items=[{
             "price_data": {
                 "currency": "eur",
@@ -3374,7 +3388,7 @@ def crear_stripe_checkout(
             },
             "quantity": 1,
         }],
-        metadata={"servicio_id": str(servicio_id), "metodo": metodo_stripe},
+        metadata={"servicio_id": str(servicio_id)},
         success_url=f"{os.getenv('BACKEND_URL', 'https://fontap-backend-production.up.railway.app')}/pago-resultado?estado=ok",
         cancel_url=f"{os.getenv('BACKEND_URL', 'https://fontap-backend-production.up.railway.app')}/pago-resultado?estado=cancelado",
         payment_intent_data={
@@ -3384,9 +3398,7 @@ def crear_stripe_checkout(
     )
     try:
         session = stripe.checkout.Session.create(**checkout_kwargs)
-    except Exception as e:
-        if metodo_stripe == "bizum":
-            raise HTTPException(status_code=400, detail="Bizum no está disponible ahora mismo para este pago. Prueba con tarjeta o efectivo mientras tanto.")
+    except Exception:
         raise HTTPException(status_code=400, detail="No se pudo iniciar el pago con tarjeta. Inténtalo de nuevo.")
     servicio.stripe_payment_intent = session.id
     db.commit()
@@ -3413,7 +3425,7 @@ def verificar_stripe_checkout(
     ya_pagado = servicio.estado == "pagado"
     if session.payment_status == "paid" and not ya_pagado:
         servicio.estado = "pagado"
-        servicio.metodo_pago = "bizum" if (session.metadata or {}).get("metodo") == "bizum" else "tarjeta"
+        servicio.metodo_pago = "stripe"
         fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
         comision = round((servicio.precio or 0) * _tasa_comision(fontanero_obj), 2)
         servicio.comision_aplicada = comision
@@ -3579,6 +3591,31 @@ def verificar_comision_pendiente(
         fontanero.comision_checkout_session = None
         db.commit()
     return {"liquidada": session.payment_status == "paid"}
+
+# ─── BIZUM ────────────────────────────────────────────────────────────────────
+
+@app.get("/servicios/{servicio_id}/bizum/instrucciones")
+def instrucciones_bizum(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio or not servicio.precio:
+        raise HTTPException(status_code=400, detail="Servicio no encontrado o sin precio")
+    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
+    usuario_fontanero = db.query(models.Usuario).filter(models.Usuario.id == fontanero_obj.usuario_id).first() if fontanero_obj else None
+    return {
+        "importe": servicio.precio,
+        "concepto": f"Multiservicios Provenza servicio #{servicio_id}",
+        "telefono_destino": usuario_fontanero.telefono if usuario_fontanero else "Consultar con el profesional",
+        "instrucciones": [
+            "1. Abre tu app bancaria y selecciona Bizum",
+            f"2. Envía {servicio.precio}€ al teléfono del profesional",
+            f"3. Añade el concepto: Multiservicios Provenza servicio #{servicio_id}",
+            "4. Vuelve a la app y confirma el pago — el profesional recibirá un aviso para confirmar que lo recibió",
+        ],
+    }
 
 # ─── INMUEBLES (ADMIN FINCAS) ─────────────────────────────────────────────────
 
