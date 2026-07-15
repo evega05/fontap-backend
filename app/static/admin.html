@@ -87,6 +87,26 @@
 
   .vacio { color: var(--ink3); text-align: center; padding: 30px; }
   #app { display: none; }
+
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(3,6,12,.6);
+    align-items: center; justify-content: center; z-index: 100; padding: 20px;
+  }
+  .modal-overlay.abierto { display: flex; }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 22px; width: 100%; max-width: 380px; }
+  .modal h3 { font-size: 16px; margin-bottom: 16px; }
+  .modal label { display: block; font-size: 12px; color: var(--ink2); font-weight: 600; margin-bottom: 5px; margin-top: 12px; }
+  .modal label:first-of-type { margin-top: 0; }
+  .modal input {
+    width: 100%; background: var(--surface2); border: 1px solid var(--border); color: var(--ink);
+    border-radius: 9px; padding: 9px 11px; font-size: 14px; outline: none;
+  }
+  .modal input:focus { border-color: var(--blue); }
+  .modal .fila-check { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+  .modal .fila-check input { width: auto; }
+  .modal .fila-check label { margin: 0; }
+  .modal .acciones { display: flex; gap: 10px; margin-top: 20px; }
+  .modal .acciones .btn { flex: 1; }
 </style>
 </head>
 <body>
@@ -151,6 +171,28 @@
       </table>
     </div>
   </section>
+</div>
+
+<div class="modal-overlay" id="modal-editar">
+  <div class="modal">
+    <h3>Editar profesional</h3>
+    <label for="e-nombre">Nombre</label>
+    <input id="e-nombre" type="text">
+    <label for="e-telefono">Teléfono</label>
+    <input id="e-telefono" type="text">
+    <label for="e-zona">Zona</label>
+    <input id="e-zona" type="text">
+    <label for="e-valoracion">Valoración (0–5)</label>
+    <input id="e-valoracion" type="number" step="0.1" min="0" max="5">
+    <label for="e-trabajos">Trabajos completados</label>
+    <input id="e-trabajos" type="number" step="1" min="0">
+    <div class="fila-check"><input id="e-disponible" type="checkbox"><label for="e-disponible">Disponible</label></div>
+    <div class="fila-check"><input id="e-verificado" type="checkbox"><label for="e-verificado">Verificado</label></div>
+    <div class="acciones">
+      <button class="btn" onclick="cerrarModalEditar()">Cancelar</button>
+      <button class="btn primary" onclick="guardarEdicionFontanero()">Guardar</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -258,10 +300,11 @@ async function cargarUsuarios() {
       ].join(' ');
       const estado = u.bloqueado ? '<span class="pill crit">⛔ Vetado</span>' : '<span class="pill good">✓ Activo</span>';
       const fecha = u.creado_en ? new Date(u.creado_en).toLocaleDateString('es-ES') : '—';
-      const boton = u.tipo === 'admin' ? '' : (u.bloqueado
+      const botonVeto = u.tipo === 'admin' ? '' : (u.bloqueado
         ? `<button class="btn small" onclick="vetar(${u.id}, false)">Quitar veto</button>`
         : `<button class="btn small danger" onclick="vetar(${u.id}, true)">Vetar</button>`);
-      return `<tr><td>${h(u.nombre)}<div class="sub">${h(u.email)}</div></td><td>${tipoTxt}</td><td>${verif}</td><td>${estado}</td><td>${fecha}</td><td>${boton}</td></tr>`;
+      const botonEliminar = u.tipo === 'admin' ? '' : `<button class="btn small danger" onclick="eliminarUsuario(${u.id}, '${h(u.nombre).replace(/'/g, "\\'")}')">Eliminar</button>`;
+      return `<tr><td>${h(u.nombre)}<div class="sub">${h(u.email)}</div></td><td>${tipoTxt}</td><td>${verif}</td><td>${estado}</td><td>${fecha}</td><td style="display:flex;gap:6px">${botonVeto}${botonEliminar}</td></tr>`;
     }).join('');
   } catch (e) { tbody.innerHTML = `<tr><td colspan="6" class="vacio">Error: ${h(e.message)}</td></tr>`; }
 }
@@ -273,6 +316,15 @@ async function vetar(id, bloquear) {
   if (!confirm(msg)) return;
   try {
     await api(`/admin/usuarios/${id}/bloquear`, { method: 'PUT', body: JSON.stringify({ bloqueado: bloquear }) });
+    cargarUsuarios(); cargarProfesionales(); cargarResumen();
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function eliminarUsuario(id, nombre) {
+  // A diferencia de vetar (reversible, solo oculta), esto borra los datos personales de forma permanente.
+  if (!confirm(`¿Eliminar la cuenta de "${nombre}" de forma permanente?\n\nEsto borra sus datos personales (nombre, email, teléfono). No se puede deshacer.\n\nSi solo quieres impedir que use la app, usa "Vetar" en su lugar.`)) return;
+  try {
+    await api(`/admin/usuarios/${id}`, { method: 'DELETE' });
     cargarUsuarios(); cargarProfesionales(); cargarResumen();
   } catch (e) { alert('Error: ' + e.message); }
 }
@@ -310,10 +362,12 @@ function renderProfesionales() {
       ? `<span class="pill warn">⏳ ${EUR.format(f.comision_pendiente)}</span>` : '<span class="pill neutro">0 €</span>';
     const estado = f.bloqueado ? '<span class="pill crit">⛔ Vetado</span>'
       : (f.disponible ? '<span class="pill good">✓ Disponible</span>' : '<span class="pill neutro">— Inactivo</span>');
-    const boton = f.usuario_id ? (f.bloqueado
+    const botonVeto = f.usuario_id ? (f.bloqueado
       ? `<button class="btn small" onclick="vetar(${f.usuario_id}, false)">Quitar veto</button>`
       : `<button class="btn small danger" onclick="vetar(${f.usuario_id}, true)">Vetar</button>`) : '';
-    return `<tr><td>${h(f.nombre)}<div class="sub">${h(f.email || '')}</div></td><td>${h(f.gremio)}</td><td>${verif}</td><td>${pro}</td><td>${stripe}</td><td>${comision}</td><td>${f.valoracion ? '★ ' + f.valoracion : '—'}</td><td>${estado}</td><td>${boton}</td></tr>`;
+    const botonEditar = `<button class="btn small" onclick="abrirEditarFontanero(${f.id})">Editar</button>`;
+    const botonEliminar = f.usuario_id ? `<button class="btn small danger" onclick="eliminarUsuario(${f.usuario_id}, '${h(f.nombre).replace(/'/g, "\\'")}')">Eliminar</button>` : '';
+    return `<tr><td>${h(f.nombre)}<div class="sub">${h(f.email || '')}</div></td><td>${h(f.gremio)}</td><td>${verif}</td><td>${pro}</td><td>${stripe}</td><td>${comision}</td><td>${f.valoracion ? '★ ' + f.valoracion : '—'}</td><td>${estado}</td><td style="display:flex;gap:6px">${botonEditar}${botonVeto}${botonEliminar}</td></tr>`;
   }).join('');
 }
 
@@ -330,6 +384,46 @@ async function certificarPro(fontaneroId, certificar) {
   if (!confirm(msg)) return;
   try {
     await api(`/admin/fontaneros/${fontaneroId}/certificar-pro?certificar=${certificar}`, { method: 'PUT' });
+    cargarProfesionales();
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+let _editandoId = null;
+
+function abrirEditarFontanero(fontaneroId) {
+  const f = _profesionales.find(x => x.id === fontaneroId);
+  if (!f) return;
+  _editandoId = fontaneroId;
+  document.getElementById('e-nombre').value = f.nombre || '';
+  document.getElementById('e-telefono').value = f.telefono || '';
+  document.getElementById('e-zona').value = f.zona || '';
+  document.getElementById('e-valoracion').value = f.valoracion ?? '';
+  document.getElementById('e-trabajos').value = f.num_trabajos ?? 0;
+  document.getElementById('e-disponible').checked = !!f.disponible;
+  document.getElementById('e-verificado').checked = !!f.verificado;
+  document.getElementById('modal-editar').classList.add('abierto');
+}
+
+function cerrarModalEditar() {
+  document.getElementById('modal-editar').classList.remove('abierto');
+  _editandoId = null;
+}
+
+async function guardarEdicionFontanero() {
+  if (_editandoId == null) return;
+  const valoracionRaw = document.getElementById('e-valoracion').value;
+  const datos = {
+    nombre: document.getElementById('e-nombre').value.trim(),
+    telefono: document.getElementById('e-telefono').value.trim(),
+    zona: document.getElementById('e-zona').value.trim(),
+    valoracion: valoracionRaw === '' ? null : parseFloat(valoracionRaw),
+    num_trabajos: parseInt(document.getElementById('e-trabajos').value, 10) || 0,
+    disponible: document.getElementById('e-disponible').checked,
+    verificado: document.getElementById('e-verificado').checked,
+  };
+  try {
+    await api(`/admin/fontaneros/${_editandoId}/editar`, { method: 'PUT', body: JSON.stringify(datos) });
+    cerrarModalEditar();
     cargarProfesionales();
   } catch (e) { alert('Error: ' + e.message); }
 }
