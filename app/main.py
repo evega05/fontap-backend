@@ -69,6 +69,11 @@ def _migrar_columnas_faltantes():
             "comision_liquidada": "BOOLEAN DEFAULT TRUE",
             "gremio": "VARCHAR",
             "google_event_id": "VARCHAR",
+            "ciudad": "VARCHAR",
+            "radio_ampliado": "BOOLEAN DEFAULT FALSE",
+            "latitud_cliente": "FLOAT",
+            "longitud_cliente": "FLOAT",
+            "aviso_proximidad_enviado": "BOOLEAN DEFAULT FALSE",
         },
         "citas": {
             "recordatorio_24h": "BOOLEAN DEFAULT FALSE",
@@ -261,6 +266,72 @@ def _crear_notificacion(db: Session, usuario_id: int, titulo: str, cuerpo: str, 
         except Exception:
             pass
 
+def _registrar_auditoria(db: Session, servicio_id: int, campo: str, anterior, nuevo, current_user: dict = None):
+    db.add(models.AuditoriaServicio(
+        servicio_id=servicio_id,
+        campo=campo,
+        valor_anterior=str(anterior) if anterior is not None else None,
+        valor_nuevo=str(nuevo) if nuevo is not None else None,
+        cambiado_por_id=current_user["id"] if current_user else None,
+        cambiado_por_tipo=current_user.get("tipo") if current_user else "sistema",
+    ))
+
+UMBRAL_CANCELACIONES = 3
+DIAS_VENTANA_CANCELACIONES = 30
+UMBRAL_RESENAS_BAJAS_MEDIA = 2.5
+MINIMO_RESENAS_PARA_ALERTA = 3
+
+def _revisar_cancelaciones_repetidas(db: Session, fontanero_id: int):
+    if not fontanero_id:
+        return
+    desde = datetime.datetime.utcnow() - datetime.timedelta(days=DIAS_VENTANA_CANCELACIONES)
+    total = db.query(models.Servicio).filter(
+        models.Servicio.fontanero_id == fontanero_id,
+        models.Servicio.estado == "cancelado",
+        models.Servicio.creado_en >= desde,
+    ).count()
+    if total < UMBRAL_CANCELACIONES:
+        return
+    ya_avisado = db.query(models.AlertaAdmin).filter(
+        models.AlertaAdmin.tipo == "cancelaciones_repetidas",
+        models.AlertaAdmin.fontanero_id == fontanero_id,
+        models.AlertaAdmin.creado_en >= desde,
+    ).first()
+    if ya_avisado:
+        return
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+    db.add(models.AlertaAdmin(
+        tipo="cancelaciones_repetidas",
+        fontanero_id=fontanero_id,
+        mensaje=f"{fontanero.nombre if fontanero else 'Un profesional'} acumula {total} cancelaciones en los últimos {DIAS_VENTANA_CANCELACIONES} días",
+    ))
+
+def _revisar_resenas_bajas(db: Session, fontanero_id: int):
+    if not fontanero_id:
+        return
+    ultimas = db.query(models.Resena).filter(
+        models.Resena.fontanero_id == fontanero_id
+    ).order_by(models.Resena.id.desc()).limit(MINIMO_RESENAS_PARA_ALERTA).all()
+    if len(ultimas) < MINIMO_RESENAS_PARA_ALERTA:
+        return
+    media = sum((r.puntualidad + r.calidad + r.precio_justo + r.trato) / 4 for r in ultimas) / len(ultimas)
+    if media > UMBRAL_RESENAS_BAJAS_MEDIA:
+        return
+    desde = datetime.datetime.utcnow() - datetime.timedelta(days=DIAS_VENTANA_CANCELACIONES)
+    ya_avisado = db.query(models.AlertaAdmin).filter(
+        models.AlertaAdmin.tipo == "resenas_bajas",
+        models.AlertaAdmin.fontanero_id == fontanero_id,
+        models.AlertaAdmin.creado_en >= desde,
+    ).first()
+    if ya_avisado:
+        return
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+    db.add(models.AlertaAdmin(
+        tipo="resenas_bajas",
+        fontanero_id=fontanero_id,
+        mensaje=f"{fontanero.nombre if fontanero else 'Un profesional'} promedia {round(media, 2)}/5 en sus últimas {len(ultimas)} reseñas",
+    ))
+
 # ─── AUTH ──────────────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -425,8 +496,82 @@ def robots_txt():
     txt = f"User-agent: *\nAllow: /landing\nDisallow: /admin\nDisallow: /uploads\nSitemap: {base}/sitemap.xml\n"
     return Response(content=txt, media_type="text/plain")
 
+def _estado_dependencias(db: Session):
+    dependencias = []
+
+    try:
+        db.execute(text("SELECT 1"))
+        dependencias.append(("Base de datos", True, "Conectada"))
+    except Exception:
+        dependencias.append(("Base de datos", False, "No responde"))
+
+    dependencias.append((
+        "Correo (verificación, recuperación de contraseña)",
+        bool(SMTP_HOST),
+        "Configurado" if SMTP_HOST else "Sin configurar (los códigos se muestran solo en los logs)",
+    ))
+
+    dependencias.append((
+        "Pagos (Stripe)",
+        bool(STRIPE_SECRET_KEY),
+        "Configurado" if STRIPE_SECRET_KEY else "Sin configurar (pago con Stripe no disponible)",
+    ))
+
+    google_ok = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
+    dependencias.append((
+        "Google Calendar",
+        google_ok,
+        "Configurado" if google_ok else "Sin configurar (falta GOOGLE_CLIENT_ID y/o GOOGLE_CLIENT_SECRET)",
+    ))
+
+    dependencias.append((
+        "Notificaciones push",
+        True,
+        "Expo Push Service (sin configuración adicional)",
+    ))
+
+    return dependencias
+
+@app.get("/status", include_in_schema=False)
+def pagina_estado(db: Session = Depends(get_db)):
+    from fastapi.responses import HTMLResponse
+    dependencias = _estado_dependencias(db)
+    todo_ok = all(ok for _, ok, _ in dependencias)
+    filas = "".join(
+        f'<tr><td>{nombre}</td><td><span class="badge {"ok" if ok else "mal"}">{"● Operativo" if ok else "● Atención"}</span></td><td>{detalle}</td></tr>'
+        for nombre, ok, detalle in dependencias
+    )
+    html = f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Estado del servicio · Multiservicios Provenza</title>
+<style>
+  body {{ font-family: -apple-system, Arial, sans-serif; background: #0f1115; color: #e6e8eb; max-width: 720px; margin: 0 auto; padding: 40px 20px; }}
+  h1 {{ font-size: 22px; }}
+  .resumen {{ display: inline-block; padding: 8px 16px; border-radius: 20px; font-weight: 600; margin-bottom: 24px; }}
+  .resumen.ok {{ background: #16321f; color: #4ade80; }}
+  .resumen.mal {{ background: #3a1f1f; color: #f87171; }}
+  table {{ width: 100%; border-collapse: collapse; }}
+  td {{ padding: 12px 8px; border-bottom: 1px solid #262a31; font-size: 14px; }}
+  .badge.ok {{ color: #4ade80; }}
+  .badge.mal {{ color: #f87171; }}
+  .footer {{ margin-top: 24px; font-size: 12px; color: #8a8f98; }}
+</style>
+</head>
+<body>
+  <h1>Estado del servicio</h1>
+  <div class="resumen {'ok' if todo_ok else 'mal'}">{'✓ Todo operativo' if todo_ok else '⚠ Algún componente necesita atención'}</div>
+  <table>{filas}</table>
+  <div class="footer">Actualizado en cada carga de esta página.</div>
+</body>
+</html>"""
+    return HTMLResponse(html)
+
 @app.post("/migrar-db")
-def migrar_db():
+def migrar_db(current_user: dict = Depends(auth.get_current_user)):
+    _verificar_admin(current_user)
     from .database import engine
     from sqlalchemy import text
     columnas = [
@@ -461,6 +606,13 @@ def registrar_usuario(usuario: schemas.UsuarioRegistro, db: Session = Depends(ge
     existe = db.query(models.Usuario).filter(models.Usuario.email == email).first()
     if existe:
         raise HTTPException(status_code=400, detail="Email ya registrado")
+    if usuario.tipo == "fontanero" and usuario.telefono:
+        telefono_en_uso = db.query(models.Fontanero).filter(
+            models.Fontanero.telefono == usuario.telefono,
+            models.Fontanero.telefono != "",
+        ).first()
+        if telefono_en_uso:
+            raise HTTPException(status_code=400, detail="Este teléfono ya está registrado en otra cuenta de profesional")
     nuevo = models.Usuario(
         nombre=usuario.nombre,
         email=email,
@@ -761,6 +913,55 @@ def ver_perfil_usuario(
         "email_verificado": usuario.email_verificado,
     }
 
+@app.get("/usuarios/{usuario_id}/aniversario")
+def ver_aniversario(
+    usuario_id: int,
+    current_user: dict = Depends(auth.get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Insignia de aniversario de cuenta: años en la plataforma + resumen del último año."""
+    if current_user["id"] != usuario_id:
+        raise HTTPException(status_code=403, detail="No puedes ver otra cuenta")
+    usuario = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    ahora = datetime.datetime.utcnow()
+    miembro_desde = usuario.creado_en
+    años = ahora.year - miembro_desde.year - (
+        (ahora.month, ahora.day) < (miembro_desde.month, miembro_desde.day)
+    )
+    proximo_aniversario = miembro_desde.replace(year=ahora.year)
+    if proximo_aniversario < ahora:
+        proximo_aniversario = proximo_aniversario.replace(year=ahora.year + 1)
+    dias_para_aniversario = (proximo_aniversario.date() - ahora.date()).days
+    es_aniversario = dias_para_aniversario <= 7 or (ahora - miembro_desde).days % 365 <= 7
+
+    hace_un_año = ahora - datetime.timedelta(days=365)
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == usuario_id).first()
+    if fontanero:
+        servicios = db.query(models.Servicio).filter(
+            models.Servicio.fontanero_id == fontanero.id,
+            models.Servicio.estado == "pagado",
+            models.Servicio.creado_en >= hace_un_año,
+        ).all()
+        total = sum(s.precio or 0 for s in servicios)
+        resumen = {"servicios_completados": len(servicios), "total_ganado": round(total, 2)}
+    else:
+        servicios = db.query(models.Servicio).filter(
+            models.Servicio.cliente_id == usuario_id,
+            models.Servicio.estado == "pagado",
+            models.Servicio.creado_en >= hace_un_año,
+        ).all()
+        total = sum(s.precio or 0 for s in servicios)
+        resumen = {"servicios_contratados": len(servicios), "total_gastado": round(total, 2)}
+
+    return {
+        "miembro_desde": miembro_desde,
+        "años": max(años, 0),
+        "es_aniversario": es_aniversario,
+        "resumen_ultimo_año": resumen,
+    }
+
 class PerfilUsuarioDatos(BaseModel):
     nombre: Optional[str] = None
     telefono: Optional[str] = None
@@ -843,6 +1044,10 @@ def _anonimizar_usuario(db: Session, usuario_id: int, usuario) -> None:
     usuario.telefono = ""
     usuario.password_hash = auth.hashear_password(secrets.token_hex(16))
     usuario.email_verificado = False
+    # Revoca cualquier JWT ya emitido para esta cuenta (get_current_user comprueba
+    # este flag en cada request): sin esto, una sesión ya iniciada seguiría
+    # funcionando hasta 7 días después de "eliminada" la cuenta.
+    usuario.bloqueado = True
 
 
 @app.delete("/usuarios/{usuario_id}")
@@ -864,7 +1069,7 @@ def eliminar_cuenta(
 # ─── FONTANEROS ────────────────────────────────────────────────────────────────
 
 @app.get("/fontaneros", response_model=List[schemas.FontaneroRespuesta])
-def listar_fontaneros(gremio: Optional[str] = None, ciudad: Optional[str] = None, db: Session = Depends(get_db)):
+def listar_fontaneros(gremio: Optional[str] = None, ciudad: Optional[str] = None, cliente_id: Optional[int] = None, db: Session = Depends(get_db)):
     # Excluye profesionales cuyo usuario esté vetado por el admin
     query = db.query(models.Fontanero).outerjoin(
         models.Usuario, models.Fontanero.usuario_id == models.Usuario.id
@@ -876,6 +1081,11 @@ def listar_fontaneros(gremio: Optional[str] = None, ciudad: Optional[str] = None
         query = query.filter(models.Fontanero.gremio == gremio)
     if ciudad:
         query = query.filter(func.lower(models.Fontanero.zona) == ciudad.lower())
+    if cliente_id:
+        bloqueados = db.query(models.ListaNegraCliente.fontanero_id).filter(
+            models.ListaNegraCliente.cliente_id == cliente_id
+        )
+        query = query.filter(~models.Fontanero.id.in_(bloqueados))
     fontaneros = query.all()
 
     precios_min = dict(
@@ -911,6 +1121,7 @@ def actualizar_disponibilidad(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -984,12 +1195,14 @@ def actualizar_ubicacion(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = get_or_create_fontanero(db, fontanero_id)
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
     fontanero.latitud = datos.latitud
     fontanero.longitud = datos.longitud
     fontanero.ubicacion_actualizada = models.utcnow()
+    _avisar_si_esta_cerca(db, fontanero)
     db.commit()
     return {"mensaje": "Ubicación actualizada"}
 
@@ -999,6 +1212,7 @@ def ver_solicitudes_fontanero(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = get_or_create_fontanero(db, fontanero_id)
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -1027,6 +1241,7 @@ def ver_solicitudes_fontanero(
             "estado": s.estado,
             "estado_color": schemas.ESTADO_COLORES.get(s.estado, "#D97706"),
             "precio": s.precio,
+            "metodo_pago": s.metodo_pago,
             "fecha": str(s.fecha) if s.fecha else None,
             "cliente_nombre": cliente.nombre if cliente else "Cliente",
             "zona": "Bilbao",
@@ -1035,8 +1250,25 @@ def ver_solicitudes_fontanero(
 
 # ─── SERVICIOS ─────────────────────────────────────────────────────────────────
 
+def _notificar_urgencia(db: Session, nuevo, tipo: str, solo_ciudad: bool):
+    bloqueados = db.query(models.ListaNegraCliente.fontanero_id).filter(
+        models.ListaNegraCliente.cliente_id == nuevo.cliente_id
+    )
+    query = db.query(models.Fontanero).filter(
+        models.Fontanero.disponible == True,
+        models.Fontanero.usuario_id != None,
+        models.Fontanero.gremio == nuevo.gremio,
+        ~models.Fontanero.id.in_(bloqueados),
+    )
+    if solo_ciudad and nuevo.ciudad:
+        query = query.filter(func.lower(models.Fontanero.zona) == nuevo.ciudad.lower())
+    for f in query.all():
+        _crear_notificacion(db, f.usuario_id, "Nueva solicitud urgente", f"Solicitud urgente de {tipo} cerca de tu zona", "solicitud_urgente", nuevo.id)
+
 def _crear_servicio_interno(db: Session, cliente_id: int, tipo: str, descripcion: Optional[str],
-                             urgente: bool, fecha, fontanero_id: Optional[int], gremio: Optional[str]):
+                             urgente: bool, fecha, fontanero_id: Optional[int], gremio: Optional[str],
+                             ciudad: Optional[str] = None, latitud_cliente: Optional[float] = None,
+                             longitud_cliente: Optional[float] = None):
     fontanero_directo = None
     if fontanero_id:
         fontanero_directo = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
@@ -1050,6 +1282,9 @@ def _crear_servicio_interno(db: Session, cliente_id: int, tipo: str, descripcion
         estado="pendiente",
         precio=None,
         gremio=fontanero_directo.gremio if fontanero_directo else gremio,
+        ciudad=ciudad,
+        latitud_cliente=latitud_cliente,
+        longitud_cliente=longitud_cliente,
     )
     db.add(nuevo)
     db.commit()
@@ -1058,13 +1293,9 @@ def _crear_servicio_interno(db: Session, cliente_id: int, tipo: str, descripcion
         _crear_notificacion(db, fontanero_directo.usuario_id, "Nueva solicitud", f"Tienes una nueva solicitud de {tipo}", "solicitud_directa", nuevo.id)
         db.commit()
     elif urgente:
-        fontaneros_zona = db.query(models.Fontanero).filter(
-            models.Fontanero.disponible == True,
-            models.Fontanero.usuario_id != None,
-            models.Fontanero.gremio == nuevo.gremio,
-        ).all()
-        for f in fontaneros_zona:
-            _crear_notificacion(db, f.usuario_id, "Nueva solicitud urgente", f"Solicitud urgente de {tipo} cerca de tu zona", "solicitud_urgente", nuevo.id)
+        # Primero se avisa solo a los profesionales de la misma ciudad; si nadie responde
+        # a tiempo, _bucle_ampliar_radio_urgencias avisará también al resto (ver más abajo).
+        _notificar_urgencia(db, nuevo, tipo, solo_ciudad=bool(nuevo.ciudad))
         db.commit()
     return nuevo
 
@@ -1077,6 +1308,7 @@ def crear_servicio(
     nuevo = _crear_servicio_interno(
         db, current_user["id"], servicio.tipo, servicio.descripcion,
         servicio.urgente, servicio.fecha, servicio.fontanero_id, servicio.gremio,
+        servicio.ciudad, servicio.latitud_cliente, servicio.longitud_cliente,
     )
     return schemas.ServicioRespuesta.from_orm_with_color(nuevo)
 
@@ -1375,6 +1607,8 @@ def enviar_precio(
     ).first()
     if not fontanero or servicio.fontanero_id != fontanero.id:
         raise HTTPException(status_code=403, detail="No puedes enviar precio para un servicio que no es tuyo")
+    _registrar_auditoria(db, servicio.id, "precio", servicio.precio, datos.precio, current_user)
+    _registrar_auditoria(db, servicio.id, "estado", servicio.estado, "precio_enviado", current_user)
     servicio.precio = datos.precio
     servicio.estado = "precio_enviado"
     _crear_notificacion(db, servicio.cliente_id, "Precio recibido", f"El fontanero ha enviado un presupuesto de {datos.precio}€", "precio_enviado", servicio.id)
@@ -1398,20 +1632,46 @@ def confirmar_pago(
         raise HTTPException(status_code=403, detail="Solo el cliente puede confirmar el pago de este servicio")
     if not servicio.precio:
         raise HTTPException(status_code=400, detail="El fontanero aún no ha enviado el precio")
-    nuevo_estado = "pago_pendiente" if datos.metodo == "efectivo" else "pagado"
+    # Efectivo y Bizum van directo cliente→fontanero, sin que la app pueda comprobar
+    # que el dinero llegó de verdad: se quedan "pendientes" hasta que el propio
+    # fontanero confirme que lo recibió (ver /confirmar_efectivo y /confirmar_bizum).
+    nuevo_estado = "pago_pendiente" if datos.metodo in ("efectivo", "bizum") else "pagado"
+    _registrar_auditoria(db, servicio.id, "estado", servicio.estado, nuevo_estado, current_user)
     servicio.estado = nuevo_estado
     servicio.metodo_pago = datos.metodo
     fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
-    if datos.metodo not in ["efectivo", "stripe"]:
-        # El dinero (ej. Bizum) va directo cliente→fontanero, sin pasar por Multiservicios Provenza:
-        # queda pendiente que el fontanero liquide la comisión de la plataforma.
+    if datos.metodo not in ["efectivo", "bizum", "stripe"]:
         servicio.comision_aplicada = round(servicio.precio * _tasa_comision(fontanero_obj), 2)
         servicio.comision_liquidada = False
         _consumir_trabajo_gratis(fontanero_obj)
     if fontanero_obj and fontanero_obj.usuario_id:
-        _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido", f"El cliente ha confirmado el pago de {servicio.precio}€ via {datos.metodo}", "pago_recibido", servicio.id)
+        if datos.metodo == "bizum":
+            _crear_notificacion(db, fontanero_obj.usuario_id, "📱 ¿Has recibido el Bizum?",
+                                 f"El cliente dice haber pagado {servicio.precio}€ por Bizum. Confírmalo en la app en cuanto lo compruebes.",
+                                 "bizum_pendiente", servicio.id)
+        else:
+            _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido", f"El cliente ha confirmado el pago de {servicio.precio}€ via {datos.metodo}", "pago_recibido", servicio.id)
     db.commit()
     return {"mensaje": "Pago registrado", "precio": servicio.precio, "metodo": datos.metodo}
+
+def _confirmar_pago_directo(db: Session, servicio_id: int, current_user: dict, etiqueta: str):
+    """Lógica compartida por /confirmar_efectivo y /confirmar_bizum: el fontanero
+    confirma que recibió el dinero directamente del cliente (sin pasar por Stripe),
+    así que la comisión de Multiservicios Provenza queda pendiente de liquidar."""
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
+    if not fontanero or servicio.fontanero_id != fontanero.id:
+        raise HTTPException(status_code=403, detail="Este servicio no es tuyo")
+    _registrar_auditoria(db, servicio.id, "estado", servicio.estado, "pagado", current_user)
+    servicio.estado = "pagado"
+    servicio.comision_aplicada = round((servicio.precio or 0) * _tasa_comision(fontanero), 2)
+    servicio.comision_liquidada = False
+    _consumir_trabajo_gratis(fontanero)
+    _crear_notificacion(db, servicio.cliente_id, "Pago confirmado", f"El profesional confirmó haber recibido tu pago en {etiqueta}", "pago_confirmado", servicio_id)
+    db.commit()
+    return {"mensaje": f"{etiqueta} confirmado"}
 
 @app.put("/servicios/{servicio_id}/confirmar_efectivo")
 def confirmar_efectivo(
@@ -1419,18 +1679,15 @@ def confirmar_efectivo(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio:
-        raise HTTPException(status_code=404, detail="Servicio no encontrado")
-    servicio.estado = "pagado"
-    # El efectivo va directo cliente→fontanero: la comisión de Multiservicios Provenza queda
-    # pendiente de que el fontanero la liquide (ver /comision-pendiente).
-    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
-    servicio.comision_aplicada = round((servicio.precio or 0) * _tasa_comision(fontanero_obj), 2)
-    servicio.comision_liquidada = False
-    _consumir_trabajo_gratis(fontanero_obj)
-    db.commit()
-    return {"mensaje": "Efectivo confirmado"}
+    return _confirmar_pago_directo(db, servicio_id, current_user, "efectivo")
+
+@app.put("/servicios/{servicio_id}/confirmar_bizum")
+def confirmar_bizum(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    return _confirmar_pago_directo(db, servicio_id, current_user, "Bizum")
 
 @app.put("/servicios/{servicio_id}/cancelar")
 def cancelar_servicio(
@@ -1452,6 +1709,7 @@ def cancelar_servicio(
     if servicio.estado in ["pagado", "completado", "cancelado"]:
         raise HTTPException(status_code=400, detail="Este servicio ya no se puede cancelar")
 
+    _registrar_auditoria(db, servicio.id, "estado", servicio.estado, "cancelado", current_user)
     servicio.estado = "cancelado"
     db.commit()
     _google_calendar_borrar(db, servicio)
@@ -1462,6 +1720,8 @@ def cancelar_servicio(
             _crear_notificacion(db, fontanero_obj.usuario_id, "Servicio cancelado", "El cliente ha cancelado la solicitud", "cancelado", servicio_id)
     elif es_fontanero:
         _crear_notificacion(db, servicio.cliente_id, "Servicio cancelado", "El profesional ha cancelado el servicio", "cancelado", servicio_id)
+    if servicio.fontanero_id:
+        _revisar_cancelaciones_repetidas(db, servicio.fontanero_id)
     db.commit()
     return {"mensaje": "Servicio cancelado"}
 
@@ -1471,6 +1731,8 @@ def ver_servicios_cliente(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if current_user["id"] != cliente_id:
+        raise HTTPException(status_code=403, detail="No puedes ver los servicios de otro cliente")
     servicios = db.query(models.Servicio).filter(
         models.Servicio.cliente_id == cliente_id
     ).order_by(models.Servicio.id.desc()).all()
@@ -1490,6 +1752,13 @@ def ver_servicios_cliente(
 
 # ─── HORARIOS / BLOQUEOS / SERVICIOS FONTANERO ────────────────────────────────
 
+def _verificar_fontanero_propio(current_user: dict, fontanero_id: int) -> None:
+    """En las rutas /fontaneros/{fontanero_id}/... el 'fontanero_id' del path es en
+    realidad el usuario_id del profesional (así lo usa _resolver_fontanero y el resto
+    de consultas de este módulo): solo el propio usuario puede gestionar sus datos."""
+    if current_user["id"] != fontanero_id:
+        raise HTTPException(status_code=403, detail="No puedes gestionar los datos de otro profesional")
+
 def _resolver_fontanero(db: Session, fontanero_id: int) -> models.Fontanero:
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
@@ -1505,6 +1774,7 @@ def crear_horario(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = _resolver_fontanero(db, fontanero_id)
     nuevo = models.HorarioBase(
         fontanero_id=fontanero.id,
@@ -1532,6 +1802,7 @@ def crear_bloqueo(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = _resolver_fontanero(db, fontanero_id)
     nuevo = models.BloqueoHorario(
         fontanero_id=fontanero.id,
@@ -1563,6 +1834,7 @@ def eliminar_bloqueo(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = _resolver_fontanero(db, fontanero_id)
     bloqueo = db.query(models.BloqueoHorario).filter(
         models.BloqueoHorario.id == bloqueo_id,
@@ -1581,6 +1853,7 @@ def añadir_servicio(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = _resolver_fontanero(db, fontanero_id)
     nuevo = models.ServicioFontanero(
         fontanero_id=fontanero.id,
@@ -1608,6 +1881,7 @@ def eliminar_servicio(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = _resolver_fontanero(db, fontanero_id)
     servicio = db.query(models.ServicioFontanero).filter(
         models.ServicioFontanero.id == servicio_id,
@@ -1622,6 +1896,29 @@ def eliminar_servicio(
 # ─── IMÁGENES DE SERVICIO ──────────────────────────────────────────────────────
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+
+def _marcar_fecha_hora(ruta: str):
+    """Estampa fecha/hora (y la marca) en la foto, como prueba de que el trabajo
+    se hizo cuando dice el profesional. Si algo falla, se deja la foto tal cual."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        img = Image.open(ruta).convert("RGB")
+        draw = ImageDraw.Draw(img, "RGBA")
+        texto = f"Multiservicios Provenza · {datetime.datetime.utcnow().strftime('%d/%m/%Y %H:%M UTC')}"
+        try:
+            fuente = ImageFont.load_default(size=max(14, img.width // 40))
+        except TypeError:
+            fuente = ImageFont.load_default()
+        bbox = draw.textbbox((0, 0), texto, font=fuente)
+        ancho_texto, alto_texto = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        margen = 10
+        x = max(0, img.width - ancho_texto - margen * 2)
+        y = max(0, img.height - alto_texto - margen * 2)
+        draw.rectangle([x - margen, y - margen, img.width, img.height], fill=(0, 0, 0, 140))
+        draw.text((x, y), texto, font=fuente, fill=(255, 255, 255, 230))
+        img.save(ruta)
+    except Exception as e:
+        print(f"[watermark] no se pudo marcar {ruta}: {e}")
 
 @app.post("/servicios/{servicio_id}/imagenes", response_model=schemas.ImagenRespuesta)
 def subir_imagen_servicio(
@@ -1640,6 +1937,7 @@ def subir_imagen_servicio(
     ruta = os.path.join(UPLOAD_DIR, nombre_archivo)
     with open(ruta, "wb") as f:
         f.write(archivo.file.read())
+    _marcar_fecha_hora(ruta)
     imagen = models.ImagenServicio(servicio_id=servicio_id, url=f"/uploads/{nombre_archivo}")
     db.add(imagen)
     db.commit()
@@ -1678,6 +1976,8 @@ def listar_chats_recientes(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if current_user["id"] != usuario_id:
+        raise HTTPException(status_code=403, detail="No puedes ver los chats de otro usuario")
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == usuario_id).first()
     fontanero_id = fontanero.id if fontanero else None
     servicios = db.query(models.Servicio).filter(
@@ -1729,6 +2029,8 @@ def registrar_push_token(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if current_user["id"] != usuario_id:
+        raise HTTPException(status_code=403, detail="No puedes registrar un token push para otro usuario")
     existente = db.query(models.TokenPush).filter(models.TokenPush.token == datos.token).first()
     if existente:
         existente.usuario_id = usuario_id
@@ -1746,6 +2048,8 @@ def eliminar_push_token(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if current_user["id"] != usuario_id:
+        raise HTTPException(status_code=403, detail="No puedes eliminar un token push de otro usuario")
     db.query(models.TokenPush).filter(
         models.TokenPush.usuario_id == usuario_id,
         models.TokenPush.token == datos.token,
@@ -1759,6 +2063,8 @@ def listar_notificaciones(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if current_user["id"] != usuario_id:
+        raise HTTPException(status_code=403, detail="No puedes ver las notificaciones de otro usuario")
     return db.query(models.Notificacion).filter(
         models.Notificacion.usuario_id == usuario_id
     ).order_by(models.Notificacion.creado_en.desc()).limit(50).all()
@@ -1801,6 +2107,7 @@ def actualizar_perfil_fontanero(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -1824,6 +2131,7 @@ def subir_foto_perfil(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -1849,6 +2157,36 @@ def ver_perfil_fontanero(fontanero_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
     return fontanero
 
+@app.get("/fontaneros/{fontanero_id}/checklist-perfil")
+def ver_checklist_perfil(fontanero_id: int, db: Session = Depends(get_db)):
+    """Checklist de perfil completo, para animar a completar el perfil antes del primer lead."""
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    tiene_servicios = db.query(models.ServicioFontanero).filter(
+        models.ServicioFontanero.fontanero_id == fontanero.id, models.ServicioFontanero.activo == True
+    ).count() > 0
+    tiene_horario = db.query(models.HorarioBase).filter(
+        models.HorarioBase.fontanero_id == fontanero.id
+    ).count() > 0
+    items = [
+        {"clave": "foto", "etiqueta": "Foto de perfil", "hecho": bool(fontanero.foto_url)},
+        {"clave": "descripcion", "etiqueta": "Descripción del negocio", "hecho": bool(fontanero.descripcion)},
+        {"clave": "telefono", "etiqueta": "Teléfono de contacto", "hecho": bool(fontanero.telefono)},
+        {"clave": "servicios", "etiqueta": "Al menos un servicio con precio", "hecho": tiene_servicios},
+        {"clave": "horario", "etiqueta": "Horario de disponibilidad", "hecho": tiene_horario},
+        {"clave": "verificacion", "etiqueta": "Documento de verificación subido", "hecho": db.query(models.DocumentoVerificacion).filter(models.DocumentoVerificacion.fontanero_id == fontanero.id).count() > 0},
+    ]
+    completados = sum(1 for i in items if i["hecho"])
+    return {
+        "items": items,
+        "completados": completados,
+        "total": len(items),
+        "porcentaje": round(completados / len(items) * 100),
+    }
+
 # ─── VACACIONES ────────────────────────────────────────────────────────────────
 
 @app.put("/fontaneros/{fontanero_id}/vacaciones")
@@ -1858,6 +2196,7 @@ def activar_vacaciones(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -1875,6 +2214,7 @@ def cancelar_vacaciones(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -1896,6 +2236,7 @@ def subir_foto_galeria(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -1936,6 +2277,7 @@ def eliminar_foto_galeria(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -1961,6 +2303,7 @@ def ver_estadisticas(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -1993,6 +2336,53 @@ def ver_estadisticas(
         "tasa_aceptacion": tasa_aceptacion,
     }
 
+@app.get("/fontaneros/{fontanero_id}/comparativa-precio")
+def ver_comparativa_precio(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Precio medio propio (servicios pagados) frente a la media del mismo
+    gremio y zona, para que el profesional sepa si está caro o barato."""
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+
+    precios_propios = [
+        s.precio for s in db.query(models.Servicio).filter(
+            models.Servicio.fontanero_id == fontanero.id,
+            models.Servicio.estado == "pagado",
+            models.Servicio.precio != None,
+        ).all()
+    ]
+    precio_propio_medio = round(sum(precios_propios) / len(precios_propios), 2) if precios_propios else None
+
+    precios_gremio = [
+        s.precio for s in db.query(models.Servicio).join(
+            models.Fontanero, models.Servicio.fontanero_id == models.Fontanero.id
+        ).filter(
+            models.Fontanero.gremio == fontanero.gremio,
+            models.Fontanero.zona == fontanero.zona,
+            models.Fontanero.id != fontanero.id,
+            models.Servicio.estado == "pagado",
+            models.Servicio.precio != None,
+        ).all()
+    ]
+    precio_gremio_medio = round(sum(precios_gremio) / len(precios_gremio), 2) if precios_gremio else None
+
+    diferencia_pct = None
+    if precio_propio_medio and precio_gremio_medio:
+        diferencia_pct = round((precio_propio_medio - precio_gremio_medio) / precio_gremio_medio * 100, 1)
+
+    return {
+        "precio_propio_medio": precio_propio_medio,
+        "precio_gremio_zona_medio": precio_gremio_medio,
+        "diferencia_pct": diferencia_pct,
+        "muestra_gremio": len(precios_gremio),
+    }
+
 @app.get("/fontaneros/{fontanero_id}/resumen-fiscal")
 def descargar_resumen_fiscal(
     fontanero_id: int,
@@ -2000,6 +2390,7 @@ def descargar_resumen_fiscal(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     from fastapi.responses import Response
     try:
         from reportlab.pdfgen import canvas
@@ -2080,6 +2471,35 @@ def buscar_fontaneros(
     return q.order_by(nullslast(models.Fontanero.valoracion.desc())).all()
 
 # ─── SEGUIMIENTO EN VIVO ───────────────────────────────────────────────────────
+
+import math
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    R = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+UMBRAL_KM_CERCA = 1.2  # aprox. 5 minutos conduciendo en ciudad
+
+def _avisar_si_esta_cerca(db: Session, fontanero):
+    if fontanero.latitud is None or fontanero.longitud is None:
+        return
+    en_camino = db.query(models.Servicio).filter(
+        models.Servicio.fontanero_id == fontanero.id,
+        models.Servicio.estado == "en_camino",
+        models.Servicio.aviso_proximidad_enviado == False,
+        models.Servicio.latitud_cliente != None,
+        models.Servicio.longitud_cliente != None,
+    ).all()
+    for servicio in en_camino:
+        distancia = _haversine_km(fontanero.latitud, fontanero.longitud, servicio.latitud_cliente, servicio.longitud_cliente)
+        if distancia <= UMBRAL_KM_CERCA:
+            _crear_notificacion(db, servicio.cliente_id, "🚗 ¡Tu profesional está a punto de llegar!",
+                                 f"{fontanero.nombre} está a unos 5 minutos", "proximidad", servicio.id)
+            servicio.aviso_proximidad_enviado = True
 
 @app.put("/servicios/{servicio_id}/en-camino")
 def marcar_en_camino(
@@ -2219,6 +2639,62 @@ def eliminar_favorito(
         db.commit()
     return {"mensaje": "Eliminado de favoritos"}
 
+# ─── LISTA NEGRA PERSONAL DEL CLIENTE ──────────────────────────────────────────
+# Distinta del veto del admin: aquí el cliente simplemente deja de ver/recibir
+# avisos de un profesional concreto, sin que eso afecte a los demás clientes.
+
+@app.get("/clientes/{cliente_id}/lista-negra")
+def ver_lista_negra(
+    cliente_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    if current_user["id"] != cliente_id:
+        raise HTTPException(status_code=403, detail="No puedes ver la lista negra de otro cliente")
+    entradas = db.query(models.ListaNegraCliente).filter(models.ListaNegraCliente.cliente_id == cliente_id).all()
+    resultado = []
+    for e in entradas:
+        fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == e.fontanero_id).first()
+        resultado.append({"fontanero_id": e.fontanero_id, "fontanero_nombre": fontanero.nombre if fontanero else None})
+    return resultado
+
+@app.post("/clientes/{cliente_id}/lista-negra/{fontanero_id}")
+def agregar_a_lista_negra(
+    cliente_id: int,
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    if current_user["id"] != cliente_id:
+        raise HTTPException(status_code=403, detail="No puedes modificar la lista negra de otro cliente")
+    existe = db.query(models.ListaNegraCliente).filter(
+        models.ListaNegraCliente.cliente_id == cliente_id,
+        models.ListaNegraCliente.fontanero_id == fontanero_id,
+    ).first()
+    if existe:
+        return {"mensaje": "Ya no verás a este profesional"}
+    db.add(models.ListaNegraCliente(cliente_id=cliente_id, fontanero_id=fontanero_id))
+    db.commit()
+    return {"mensaje": "Ya no verás a este profesional"}
+
+@app.delete("/clientes/{cliente_id}/lista-negra/{fontanero_id}")
+def quitar_de_lista_negra(
+    cliente_id: int,
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    if current_user["id"] != cliente_id:
+        raise HTTPException(status_code=403, detail="No puedes modificar la lista negra de otro cliente")
+    entrada = db.query(models.ListaNegraCliente).filter(
+        models.ListaNegraCliente.cliente_id == cliente_id,
+        models.ListaNegraCliente.fontanero_id == fontanero_id,
+    ).first()
+    if entrada:
+        db.delete(entrada)
+        db.commit()
+    return {"mensaje": "Profesional restaurado"}
+
 @app.get("/clientes/{cliente_id}/favoritos", response_model=List[schemas.FontaneroRespuesta])
 def listar_favoritos(
     cliente_id: int,
@@ -2307,9 +2783,13 @@ def listar_ofertas(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    bloqueados = db.query(models.ListaNegraCliente.fontanero_id).filter(
+        models.ListaNegraCliente.cliente_id == current_user["id"]
+    )
     ofertas = db.query(models.Oferta).filter(
         models.Oferta.servicio_id == servicio_id,
         models.Oferta.estado == "pendiente",
+        ~models.Oferta.fontanero_id.in_(bloqueados),
     ).order_by(models.Oferta.precio).all()
     return [_enriquecer_oferta(db, o, incluir_fontanero=True) for o in ofertas]
 
@@ -2419,6 +2899,7 @@ def crear_resena(
         fontanero.num_trabajos = (fontanero.num_trabajos or 0) + 1
         if fontanero.usuario_id:
             _crear_notificacion(db, fontanero.usuario_id, "Nueva reseña recibida", f"Has recibido una valoración de {media}/5", "resena", servicio_id)
+        _revisar_resenas_bajas(db, fontanero.id)
     db.commit()
     db.refresh(resena)
     return resena
@@ -2473,6 +2954,7 @@ def crear_cita(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -2488,12 +2970,85 @@ def crear_cita(
     db.refresh(cita)
     return cita
 
+@app.get("/fontaneros/{fontanero_id}/ruta-hoy")
+def ver_ruta_hoy(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Citas de hoy ordenadas por cercanía geográfica, empezando desde la posición
+    actual del profesional (algoritmo del vecino más cercano). Junta tanto las citas
+    del calendario interno como los servicios con fecha programada para hoy."""
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    hoy = datetime.datetime.utcnow().date()
+
+    pendientes = []
+    vistos_servicio_id = set()
+
+    citas_hoy = db.query(models.Cita).filter(
+        models.Cita.fontanero_id == fontanero.id,
+        func.date(models.Cita.fecha_inicio) == hoy,
+    ).all()
+    for cita in citas_hoy:
+        servicio = db.query(models.Servicio).filter(models.Servicio.id == cita.servicio_id).first() if cita.servicio_id else None
+        pendientes.append({
+            "id": f"cita-{cita.id}",
+            "titulo": cita.titulo,
+            "fecha_inicio": cita.fecha_inicio,
+            "servicio_id": cita.servicio_id,
+            "latitud": servicio.latitud_cliente if servicio else None,
+            "longitud": servicio.longitud_cliente if servicio else None,
+            "tiene_ubicacion": bool(servicio and servicio.latitud_cliente is not None),
+        })
+        if cita.servicio_id:
+            vistos_servicio_id.add(cita.servicio_id)
+
+    servicios_hoy = db.query(models.Servicio).filter(
+        models.Servicio.fontanero_id == fontanero.id,
+        models.Servicio.estado.in_(["aceptado", "precio_enviado", "pago_pendiente", "en_camino"]),
+        models.Servicio.fecha != None,
+        func.date(models.Servicio.fecha) == hoy,
+    ).all()
+    for servicio in servicios_hoy:
+        if servicio.id in vistos_servicio_id:
+            continue
+        pendientes.append({
+            "id": f"servicio-{servicio.id}",
+            "titulo": servicio.tipo,
+            "fecha_inicio": servicio.fecha,
+            "servicio_id": servicio.id,
+            "latitud": servicio.latitud_cliente,
+            "longitud": servicio.longitud_cliente,
+            "tiene_ubicacion": servicio.latitud_cliente is not None,
+        })
+
+    con_ubicacion = [c for c in pendientes if c["tiene_ubicacion"]]
+    sin_ubicacion = [c for c in pendientes if not c["tiene_ubicacion"]]
+
+    ruta = []
+    if con_ubicacion:
+        lat_actual = fontanero.latitud
+        lon_actual = fontanero.longitud
+        restantes = con_ubicacion[:]
+        while restantes:
+            if lat_actual is not None and lon_actual is not None:
+                restantes.sort(key=lambda c: _haversine_km(lat_actual, lon_actual, c["latitud"], c["longitud"]))
+            siguiente = restantes.pop(0)
+            ruta.append(siguiente)
+            lat_actual, lon_actual = siguiente["latitud"], siguiente["longitud"]
+
+    sin_ubicacion.sort(key=lambda c: c["fecha_inicio"] or datetime.datetime.min)
+    return {"con_ubicacion": ruta, "sin_ubicacion": sin_ubicacion}
+
 @app.get("/fontaneros/{fontanero_id}/citas", response_model=List[schemas.CitaRespuesta])
 def ver_citas(
     fontanero_id: int,
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -2508,6 +3063,7 @@ def eliminar_cita(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -2626,6 +3182,17 @@ def google_calendar_conectar(
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
         raise HTTPException(status_code=400, detail="Google Calendar no está configurado en el servidor")
     from urllib.parse import urlencode
+    # Token de estado aleatorio ligado al usuario que inicia el flujo: el callback
+    # nunca debe confiar en un usuario_id que llega directo por query string (eso
+    # permitiría a un atacante completar su propio consentimiento de Google y
+    # enlazar su refresh_token a la cuenta de otro profesional). Igual que
+    # VerificacionEmail/PasswordReset: token corto de un solo uso con caducidad.
+    state_token = secrets.token_urlsafe(24)
+    db.add(models.EstadoOAuth(
+        usuario_id=current_user["id"], token=state_token,
+        expira=datetime.datetime.utcnow() + datetime.timedelta(minutes=10),
+    ))
+    db.commit()
     params = {
         "client_id": GOOGLE_CLIENT_ID,
         "redirect_uri": _google_calendar_redirect_uri(),
@@ -2633,7 +3200,7 @@ def google_calendar_conectar(
         "access_type": "offline",
         "prompt": "consent",
         "scope": "https://www.googleapis.com/auth/calendar.events",
-        "state": str(fontanero_id),
+        "state": state_token,
     }
     return {"url": f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"}
 
@@ -2650,7 +3217,15 @@ def google_calendar_callback(code: Optional[str] = None, state: Optional[str] = 
 
     if error or not code or not state:
         return _pagina("❌ No se pudo conectar Google Calendar")
-    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == int(state)).first()
+    estado = db.query(models.EstadoOAuth).filter(
+        models.EstadoOAuth.token == state,
+        models.EstadoOAuth.usado == False,
+    ).order_by(models.EstadoOAuth.id.desc()).first()
+    if not estado or estado.expira < datetime.datetime.utcnow():
+        return _pagina("❌ El enlace de conexión caducó o no es válido. Vuelve a intentarlo desde la app")
+    estado.usado = True
+    db.commit()
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == estado.usuario_id).first()
     if not fontanero:
         return _pagina("❌ Profesional no encontrado")
     try:
@@ -2699,6 +3274,7 @@ def historial_pagos(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -2806,19 +3382,46 @@ def confirmar_stripe(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    """Igual que /stripe/verificar: nunca confiamos en que el cliente 'diga' que
+    pagó, se verifica directo contra Stripe antes de marcar el servicio como pagado."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=501, detail="Stripe no configurado. Añade STRIPE_SECRET_KEY en variables de entorno.")
+    try:
+        import stripe
+        stripe.api_key = STRIPE_SECRET_KEY
+    except ImportError:
+        raise HTTPException(status_code=501, detail="Librería stripe no instalada.")
+
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    es_cliente = servicio.cliente_id == current_user["id"]
+    fontanero_actual = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == current_user["id"]
+    ).first()
+    es_fontanero = bool(fontanero_actual) and servicio.fontanero_id == fontanero_actual.id
+    if not es_cliente and not es_fontanero:
+        raise HTTPException(status_code=403, detail="No puedes confirmar el pago de un servicio que no es tuyo")
+    if not servicio.stripe_payment_intent:
+        raise HTTPException(status_code=400, detail="No hay sesión de pago de Stripe para este servicio")
+
+    session = stripe.checkout.Session.retrieve(servicio.stripe_payment_intent)
+    if session.payment_status != "paid":
+        raise HTTPException(status_code=400, detail="El pago todavía no se ha completado en Stripe")
+
+    ya_pagado = servicio.estado == "pagado"
     servicio.estado = "pagado"
     servicio.metodo_pago = "stripe"
     fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
-    comision = round((servicio.precio or 0) * _tasa_comision(fontanero_obj), 2)
-    servicio.comision_aplicada = comision
-    _consumir_trabajo_gratis(fontanero_obj)
-    if fontanero_obj and fontanero_obj.usuario_id:
-        _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido por Stripe", f"Pago de {servicio.precio}€ confirmado", "pago_recibido", servicio_id)
+    if not ya_pagado:
+        comision = round((servicio.precio or 0) * _tasa_comision(fontanero_obj), 2)
+        servicio.comision_aplicada = comision
+        servicio.comision_liquidada = True  # Stripe ya retuvo/repartió la comisión al cobrar
+        _consumir_trabajo_gratis(fontanero_obj)
+        if fontanero_obj and fontanero_obj.usuario_id:
+            _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido por Stripe", f"Pago de {servicio.precio}€ confirmado", "pago_recibido", servicio_id)
     db.commit()
-    return {"mensaje": "Pago confirmado", "precio": servicio.precio, "comision": comision}
+    return {"mensaje": "Pago confirmado", "precio": servicio.precio, "comision": servicio.comision_aplicada}
 
 @app.post("/servicios/{servicio_id}/stripe/crear-checkout")
 def crear_stripe_checkout(
@@ -2843,6 +3446,23 @@ def crear_stripe_checkout(
         raise HTTPException(status_code=403, detail="Solo el cliente puede pagar este servicio")
 
     fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
+
+    # El pago con tarjeta reparte el dinero automáticamente al profesional (menos la
+    # comisión) vía Stripe Connect. Si no tiene cuenta conectada y activa, el dinero
+    # se quedaría en la cuenta de Multiservicios Provenza sin ninguna forma automática
+    # de llegarle, así que no se permite cobrar por tarjeta hasta que la conecte.
+    if not fontanero_obj or not fontanero_obj.stripe_account_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Este profesional todavía no ha conectado su cuenta de cobro. Pídele que pulse \"Conectar\" en su panel, o paga en efectivo/Bizum mientras tanto.",
+        )
+    cuenta_stripe = stripe.Account.retrieve(fontanero_obj.stripe_account_id)
+    if not cuenta_stripe.charges_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="Este profesional está terminando de configurar su cuenta de cobro. Prueba de nuevo en unos minutos, o paga en efectivo/Bizum mientras tanto.",
+        )
+
     comision_centavos = round(servicio.precio * 100 * _tasa_comision(fontanero_obj))
 
     checkout_kwargs = dict(
@@ -2859,15 +3479,15 @@ def crear_stripe_checkout(
         metadata={"servicio_id": str(servicio_id)},
         success_url=f"{os.getenv('BACKEND_URL', 'https://fontap-backend-production.up.railway.app')}/pago-resultado?estado=ok",
         cancel_url=f"{os.getenv('BACKEND_URL', 'https://fontap-backend-production.up.railway.app')}/pago-resultado?estado=cancelado",
-    )
-    # Si el fontanero ya conectó su cuenta de Stripe, repartimos automático:
-    # la comisión se queda en Multiservicios Provenza, el resto va directo a su cuenta.
-    if fontanero_obj and fontanero_obj.stripe_account_id:
-        checkout_kwargs["payment_intent_data"] = {
+        payment_intent_data={
             "application_fee_amount": comision_centavos,
             "transfer_data": {"destination": fontanero_obj.stripe_account_id},
-        }
-    session = stripe.checkout.Session.create(**checkout_kwargs)
+        },
+    )
+    try:
+        session = stripe.checkout.Session.create(**checkout_kwargs)
+    except Exception:
+        raise HTTPException(status_code=400, detail="No se pudo iniciar el pago con tarjeta. Inténtalo de nuevo.")
     servicio.stripe_payment_intent = session.id
     db.commit()
     return {"checkout_url": session.url, "session_id": session.id}
@@ -3078,10 +3698,10 @@ def instrucciones_bizum(
         "concepto": f"Multiservicios Provenza servicio #{servicio_id}",
         "telefono_destino": usuario_fontanero.telefono if usuario_fontanero else "Consultar con el profesional",
         "instrucciones": [
-            f"1. Abre tu app bancaria y selecciona Bizum",
+            "1. Abre tu app bancaria y selecciona Bizum",
             f"2. Envía {servicio.precio}€ al teléfono del profesional",
             f"3. Añade el concepto: Multiservicios Provenza servicio #{servicio_id}",
-            f"4. Vuelve a la app y confirma el pago",
+            "4. Vuelve a la app y confirma el pago — el profesional recibirá un aviso para confirmar que lo recibió",
         ],
     }
 
@@ -3139,6 +3759,7 @@ def subir_documento(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -3164,6 +3785,7 @@ def ver_documentos(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -3390,6 +4012,124 @@ def admin_editar_fontanero(
     db.commit()
     return {"mensaje": "Profesional actualizado"}
 
+@app.get("/admin/documentos")
+def admin_listar_documentos(
+    estado: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Documentos de verificación de identidad, con la foto de perfil del profesional
+    al lado para que el admin pueda compararlas visualmente antes de aprobar."""
+    _verificar_admin(current_user)
+    q = db.query(models.DocumentoVerificacion)
+    if estado:
+        q = q.filter(models.DocumentoVerificacion.estado == estado)
+    docs = q.order_by(models.DocumentoVerificacion.creado_en.desc()).all()
+    resultado = []
+    for d in docs:
+        fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == d.fontanero_id).first()
+        resultado.append({
+            "id": d.id,
+            "tipo": d.tipo,
+            "url": d.url,
+            "estado": d.estado,
+            "creado_en": d.creado_en,
+            "fontanero_id": d.fontanero_id,
+            "fontanero_nombre": fontanero.nombre if fontanero else None,
+            "fontanero_foto_url": fontanero.foto_url if fontanero else None,
+        })
+    return resultado
+
+@app.get("/admin/alertas")
+def admin_listar_alertas(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Alertas automáticas: profesionales con cancelaciones o reseñas bajas repetidas."""
+    _verificar_admin(current_user)
+    alertas = db.query(models.AlertaAdmin).order_by(models.AlertaAdmin.creado_en.desc()).limit(100).all()
+    resultado = []
+    for a in alertas:
+        fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == a.fontanero_id).first() if a.fontanero_id else None
+        resultado.append({
+            "id": a.id,
+            "tipo": a.tipo,
+            "mensaje": a.mensaje,
+            "creado_en": a.creado_en,
+            "fontanero_id": a.fontanero_id,
+            "fontanero_nombre": fontanero.nombre if fontanero else None,
+        })
+    return resultado
+
+@app.get("/admin/fraude")
+def admin_deteccion_fraude(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Panel de detección de fraude: pagos en efectivo/bizum repetidamente no liquidados,
+    y pares cliente-profesional con muchos servicios y siempre 5 estrellas en poco tiempo."""
+    _verificar_admin(current_user)
+    señales = []
+
+    no_liquidados = (
+        db.query(models.Servicio.fontanero_id, func.count(models.Servicio.id).label("total"))
+        .filter(models.Servicio.comision_liquidada == False, models.Servicio.fontanero_id != None)
+        .group_by(models.Servicio.fontanero_id)
+        .having(func.count(models.Servicio.id) >= 3)
+        .all()
+    )
+    for fontanero_id, total in no_liquidados:
+        fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+        señales.append({
+            "tipo": "efectivo_no_liquidado",
+            "fontanero_id": fontanero_id,
+            "fontanero_nombre": fontanero.nombre if fontanero else None,
+            "detalle": f"{total} pagos en efectivo/bizum sin liquidar la comisión",
+        })
+
+    desde = datetime.datetime.utcnow() - datetime.timedelta(days=60)
+    pares = (
+        db.query(models.Servicio.cliente_id, models.Servicio.fontanero_id, func.count(models.Servicio.id).label("total"))
+        .filter(models.Servicio.fontanero_id != None, models.Servicio.creado_en >= desde)
+        .group_by(models.Servicio.cliente_id, models.Servicio.fontanero_id)
+        .having(func.count(models.Servicio.id) >= 4)
+        .all()
+    )
+    for cliente_id, fontanero_id, total in pares:
+        resenas_par = db.query(models.Resena).join(
+            models.Servicio, models.Resena.servicio_id == models.Servicio.id
+        ).filter(
+            models.Servicio.cliente_id == cliente_id,
+            models.Servicio.fontanero_id == fontanero_id,
+        ).all()
+        if len(resenas_par) < 3:
+            continue
+        todas_perfectas = all((r.puntualidad + r.calidad + r.precio_justo + r.trato) / 4 >= 5 for r in resenas_par)
+        if not todas_perfectas:
+            continue
+        cliente = db.query(models.Usuario).filter(models.Usuario.id == cliente_id).first()
+        fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+        señales.append({
+            "tipo": "resenas_cruzadas_sospechosas",
+            "fontanero_id": fontanero_id,
+            "fontanero_nombre": fontanero.nombre if fontanero else None,
+            "detalle": f"{total} servicios en 60 días con {cliente.nombre if cliente else 'un mismo cliente'}, siempre 5 estrellas",
+        })
+
+    return señales
+
+@app.get("/admin/servicios/{servicio_id}/auditoria")
+def admin_auditoria_servicio(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Historial de cambios de precio y estado de un servicio."""
+    _verificar_admin(current_user)
+    return db.query(models.AuditoriaServicio).filter(
+        models.AuditoriaServicio.servicio_id == servicio_id
+    ).order_by(models.AuditoriaServicio.creado_en.asc()).all()
+
 @app.put("/admin/documentos/{doc_id}/revisar")
 def admin_revisar_documento(
     doc_id: int,
@@ -3413,6 +4153,21 @@ def admin_revisar_documento(
 
 # ─── MENSAJES CHAT ────────────────────────────────────────────────────────────
 
+def _verificar_participante_servicio(db: Session, servicio_id: int, current_user: dict) -> models.Servicio:
+    """Solo el cliente o el profesional asignado a un servicio pueden leer o
+    escribir en su chat (evita leer/inyectar mensajes de conversaciones ajenas)."""
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    es_cliente = servicio.cliente_id == current_user["id"]
+    fontanero_actual = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == current_user["id"]
+    ).first()
+    es_fontanero = bool(fontanero_actual) and servicio.fontanero_id == fontanero_actual.id
+    if not es_cliente and not es_fontanero:
+        raise HTTPException(status_code=403, detail="No participas en este servicio")
+    return servicio
+
 class MensajeCrear(BaseModel):
     contenido: str
 
@@ -3423,9 +4178,7 @@ def enviar_mensaje(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio:
-        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    servicio = _verificar_participante_servicio(db, servicio_id, current_user)
     emisor_id = current_user["id"]
     emisor = db.query(models.Usuario).filter(models.Usuario.id == emisor_id).first()
     nuevo = models.Mensaje(
@@ -3459,9 +4212,7 @@ def enviar_mensaje_imagen(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio:
-        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    servicio = _verificar_participante_servicio(db, servicio_id, current_user)
     if archivo.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
     emisor_id = current_user["id"]
@@ -3502,6 +4253,7 @@ def ver_mensajes(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_participante_servicio(db, servicio_id, current_user)
     mensajes = db.query(models.Mensaje).filter(
         models.Mensaje.servicio_id == servicio_id
     ).order_by(models.Mensaje.creado_en).all()
@@ -3527,6 +4279,15 @@ class MensajeChatCrear(BaseModel):
 def _escapar_like(valor: str) -> str:
     return valor.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
+def _verificar_chat_id_propio(db: Session, chat_id: str, current_user: dict) -> None:
+    """chat_id identifica la conversación por el id del servicio al que pertenece:
+    solo el cliente o el profesional asignado a ese servicio puede leer/escribir."""
+    try:
+        servicio_id = int(chat_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=404, detail="Chat no encontrado")
+    _verificar_participante_servicio(db, servicio_id, current_user)
+
 @app.post("/chat/{chat_id}/mensajes")
 def enviar_mensaje_chat(
     chat_id: str,
@@ -3534,6 +4295,7 @@ def enviar_mensaje_chat(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_chat_id_propio(db, chat_id, current_user)
     nombre = mensaje.remitente_nombre or "Usuario"
     nuevo = models.Mensaje(
         servicio_id=0,
@@ -3558,6 +4320,7 @@ def ver_mensajes_chat(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_chat_id_propio(db, chat_id, current_user)
     mensajes = db.query(models.Mensaje).filter(
         models.Mensaje.texto.like(f"{_escapar_like(chat_id)}||%", escape="\\")
     ).order_by(models.Mensaje.creado_en).all()
@@ -3655,3 +4418,39 @@ def _bucle_servicios_recurrentes():
 
 if os.getenv("DESACTIVAR_RECORDATORIOS", "") != "1":
     threading.Thread(target=_bucle_servicios_recurrentes, daemon=True).start()
+
+# ─── URGENCIAS: AMPLIAR RADIO SI NADIE RESPONDE ────────────────────────────────
+# Una urgencia sin fontanero directo se avisa primero solo a los profesionales
+# de la misma ciudad. Si tras MINUTOS_ANTES_DE_AMPLIAR nadie la ha aceptado,
+# se avisa también al resto del gremio en otras ciudades.
+
+MINUTOS_ANTES_DE_AMPLIAR = 8
+
+def _bucle_ampliar_radio_urgencias():
+    from .database import SessionLocal
+    while True:
+        db = None
+        try:
+            db = SessionLocal()
+            limite = datetime.datetime.utcnow() - datetime.timedelta(minutes=MINUTOS_ANTES_DE_AMPLIAR)
+            pendientes = db.query(models.Servicio).filter(
+                models.Servicio.urgente == True,
+                models.Servicio.estado == "pendiente",
+                models.Servicio.fontanero_id == None,
+                models.Servicio.radio_ampliado == False,
+                models.Servicio.ciudad != None,
+                models.Servicio.creado_en <= limite,
+            ).all()
+            for servicio in pendientes:
+                _notificar_urgencia(db, servicio, servicio.tipo, solo_ciudad=False)
+                servicio.radio_ampliado = True
+            db.commit()
+        except Exception as e:
+            print(f"[ampliar-radio-urgencias] error: {e}")
+        finally:
+            if db is not None:
+                db.close()
+        _time.sleep(120)
+
+if os.getenv("DESACTIVAR_RECORDATORIOS", "") != "1":
+    threading.Thread(target=_bucle_ampliar_radio_urgencias, daemon=True).start()

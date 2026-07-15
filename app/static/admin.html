@@ -130,6 +130,8 @@
     <button id="tab-resumen" class="activo" onclick="verTab('resumen')">Resumen</button>
     <button id="tab-usuarios" onclick="verTab('usuarios')">Usuarios</button>
     <button id="tab-profesionales" onclick="verTab('profesionales')">Profesionales</button>
+    <button id="tab-verificacion" onclick="verTab('verificacion')">Verificación</button>
+    <button id="tab-alertas" onclick="verTab('alertas')">Alertas</button>
   </nav>
 
   <section id="vista-resumen">
@@ -169,6 +171,29 @@
         <thead><tr><th>Profesional</th><th>Gremio</th><th>Verificado</th><th>Provenza Pro</th><th>Stripe</th><th>Comisión pendiente</th><th>Valoración</th><th>Estado</th><th></th></tr></thead>
         <tbody id="f-tbody"><tr><td colspan="9" class="vacio">Cargando…</td></tr></tbody>
       </table>
+    </div>
+  </section>
+
+  <section id="vista-verificacion" style="display:none">
+    <div class="toolbar">
+      <select id="v-estado" onchange="cargarDocumentos()">
+        <option value="pendiente">Pendientes</option>
+        <option value="verificado">Verificados</option>
+        <option value="rechazado">Rechazados</option>
+        <option value="">Todos</option>
+      </select>
+    </div>
+    <div id="v-lista"></div>
+  </section>
+
+  <section id="vista-alertas" style="display:none">
+    <div class="gremios" style="margin-bottom:20px">
+      <div class="label">Cancelaciones y reseñas bajas repetidas</div>
+      <div id="a-alertas" class="vacio">Cargando…</div>
+    </div>
+    <div class="gremios">
+      <div class="label">Posibles señales de fraude</div>
+      <div id="a-fraude" class="vacio">Cargando…</div>
     </div>
   </section>
 </div>
@@ -239,11 +264,11 @@ function salir() {
 function mostrarApp() {
   document.getElementById('login').style.display = 'none';
   document.getElementById('app').style.display = 'block';
-  cargarResumen(); cargarUsuarios(); cargarProfesionales();
+  cargarResumen(); cargarUsuarios(); cargarProfesionales(); cargarDocumentos(); cargarAlertas();
 }
 
 function verTab(nombre) {
-  for (const t of ['resumen', 'usuarios', 'profesionales']) {
+  for (const t of ['resumen', 'usuarios', 'profesionales', 'verificacion', 'alertas']) {
     document.getElementById('vista-' + t).style.display = t === nombre ? 'block' : 'none';
     document.getElementById('tab-' + t).classList.toggle('activo', t === nombre);
   }
@@ -426,6 +451,71 @@ async function guardarEdicionFontanero() {
     cerrarModalEditar();
     cargarProfesionales();
   } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function cargarDocumentos() {
+  const lista = document.getElementById('v-lista');
+  if (!lista) return;
+  const estado = document.getElementById('v-estado').value;
+  lista.innerHTML = '<div class="vacio">Cargando…</div>';
+  try {
+    const docs = await api('/admin/documentos' + (estado ? `?estado=${estado}` : ''));
+    if (!docs.length) { lista.innerHTML = '<div class="vacio">No hay documentos que coincidan</div>'; return; }
+    lista.innerHTML = docs.map(d => {
+      const estadoPill = d.estado === 'verificado' ? '<span class="pill good">✓ Verificado</span>'
+        : d.estado === 'rechazado' ? '<span class="pill crit">✗ Rechazado</span>'
+        : '<span class="pill warn">⏳ Pendiente</span>';
+      const acciones = d.estado === 'pendiente'
+        ? `<button class="btn small primary" onclick="revisarDocumento(${d.id}, 'verificado')">Aprobar</button>
+           <button class="btn small danger" onclick="revisarDocumento(${d.id}, 'rechazado')">Rechazar</button>`
+        : '';
+      return `<div class="gremios" style="margin-bottom:12px">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px">
+          <div><strong>${h(d.fontanero_nombre || 'Profesional')}</strong> <span class="sub">· ${h(d.tipo)}</span></div>
+          <div style="display:flex; align-items:center; gap:8px">${estadoPill}${acciones}</div>
+        </div>
+        <div style="display:flex; gap:16px; flex-wrap:wrap">
+          <div>
+            <div class="sub" style="margin-bottom:6px">Foto de perfil</div>
+            ${d.fontanero_foto_url ? `<img src="${h(d.fontanero_foto_url)}" style="width:160px;height:160px;object-fit:cover;border-radius:10px;border:1px solid var(--border)">` : '<div class="vacio" style="width:160px">Sin foto</div>'}
+          </div>
+          <div>
+            <div class="sub" style="margin-bottom:6px">Documento (${h(d.tipo)})</div>
+            <img src="${h(d.url)}" style="width:160px;height:160px;object-fit:cover;border-radius:10px;border:1px solid var(--border)">
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch (e) { lista.innerHTML = `<div class="vacio">Error: ${h(e.message)}</div>`; }
+}
+
+async function revisarDocumento(docId, estado) {
+  try {
+    await api(`/admin/documentos/${docId}/revisar?estado=${estado}`, { method: 'PUT' });
+    cargarDocumentos();
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function cargarAlertas() {
+  const cAlertas = document.getElementById('a-alertas');
+  const cFraude = document.getElementById('a-fraude');
+  if (!cAlertas || !cFraude) return;
+  try {
+    const alertas = await api('/admin/alertas');
+    cAlertas.innerHTML = alertas.length
+      ? '<ul style="list-style:none; display:flex; flex-direction:column; gap:8px">' + alertas.map(a =>
+          `<li>${a.tipo === 'cancelaciones_repetidas' ? '<span class="pill warn">⚠ Cancelaciones</span>' : '<span class="pill crit">★ Reseñas bajas</span>'} ${h(a.mensaje)} <span class="sub">· ${new Date(a.creado_en).toLocaleDateString('es-ES')}</span></li>`
+        ).join('') + '</ul>'
+      : '<div class="vacio">Sin alertas por ahora</div>';
+  } catch (e) { cAlertas.innerHTML = `<div class="vacio">Error: ${h(e.message)}</div>`; }
+  try {
+    const fraude = await api('/admin/fraude');
+    cFraude.innerHTML = fraude.length
+      ? '<ul style="list-style:none; display:flex; flex-direction:column; gap:8px">' + fraude.map(f =>
+          `<li><span class="pill crit">🔎 ${f.tipo === 'efectivo_no_liquidado' ? 'Efectivo sin liquidar' : 'Reseñas cruzadas'}</span> <strong>${h(f.fontanero_nombre || '')}</strong>: ${h(f.detalle)}</li>`
+        ).join('') + '</ul>'
+      : '<div class="vacio">Sin señales de fraude por ahora</div>';
+  } catch (e) { cFraude.innerHTML = `<div class="vacio">Error: ${h(e.message)}</div>`; }
 }
 
 if (token) mostrarApp();
