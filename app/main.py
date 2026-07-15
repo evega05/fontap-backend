@@ -517,6 +517,13 @@ def _estado_dependencias(db: Session):
         "Configurado" if STRIPE_SECRET_KEY else "Sin configurar (pago con Stripe no disponible)",
     ))
 
+    google_ok = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
+    dependencias.append((
+        "Google Calendar",
+        google_ok,
+        "Configurado" if google_ok else "Sin configurar (falta GOOGLE_CLIENT_ID y/o GOOGLE_CLIENT_SECRET)",
+    ))
+
     dependencias.append((
         "Notificaciones push",
         True,
