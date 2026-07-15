@@ -911,6 +911,7 @@ def actualizar_disponibilidad(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -984,6 +985,7 @@ def actualizar_ubicacion(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = get_or_create_fontanero(db, fontanero_id)
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -999,6 +1001,7 @@ def ver_solicitudes_fontanero(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = get_or_create_fontanero(db, fontanero_id)
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -1478,6 +1481,8 @@ def ver_servicios_cliente(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if current_user["id"] != cliente_id:
+        raise HTTPException(status_code=403, detail="No puedes ver los servicios de otro cliente")
     servicios = db.query(models.Servicio).filter(
         models.Servicio.cliente_id == cliente_id
     ).order_by(models.Servicio.id.desc()).all()
@@ -1497,6 +1502,13 @@ def ver_servicios_cliente(
 
 # ─── HORARIOS / BLOQUEOS / SERVICIOS FONTANERO ────────────────────────────────
 
+def _verificar_fontanero_propio(current_user: dict, fontanero_id: int) -> None:
+    """En las rutas /fontaneros/{fontanero_id}/... el 'fontanero_id' del path es en
+    realidad el usuario_id del profesional (así lo usa _resolver_fontanero y el resto
+    de consultas de este módulo): solo el propio usuario puede gestionar sus datos."""
+    if current_user["id"] != fontanero_id:
+        raise HTTPException(status_code=403, detail="No puedes gestionar los datos de otro profesional")
+
 def _resolver_fontanero(db: Session, fontanero_id: int) -> models.Fontanero:
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
@@ -1512,6 +1524,7 @@ def crear_horario(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = _resolver_fontanero(db, fontanero_id)
     nuevo = models.HorarioBase(
         fontanero_id=fontanero.id,
@@ -1539,6 +1552,7 @@ def crear_bloqueo(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = _resolver_fontanero(db, fontanero_id)
     nuevo = models.BloqueoHorario(
         fontanero_id=fontanero.id,
@@ -1570,6 +1584,7 @@ def eliminar_bloqueo(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = _resolver_fontanero(db, fontanero_id)
     bloqueo = db.query(models.BloqueoHorario).filter(
         models.BloqueoHorario.id == bloqueo_id,
@@ -1588,6 +1603,7 @@ def añadir_servicio(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = _resolver_fontanero(db, fontanero_id)
     nuevo = models.ServicioFontanero(
         fontanero_id=fontanero.id,
@@ -1615,6 +1631,7 @@ def eliminar_servicio(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = _resolver_fontanero(db, fontanero_id)
     servicio = db.query(models.ServicioFontanero).filter(
         models.ServicioFontanero.id == servicio_id,
@@ -1685,6 +1702,8 @@ def listar_chats_recientes(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if current_user["id"] != usuario_id:
+        raise HTTPException(status_code=403, detail="No puedes ver los chats de otro usuario")
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == usuario_id).first()
     fontanero_id = fontanero.id if fontanero else None
     servicios = db.query(models.Servicio).filter(
@@ -1736,6 +1755,8 @@ def registrar_push_token(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if current_user["id"] != usuario_id:
+        raise HTTPException(status_code=403, detail="No puedes registrar un token push para otro usuario")
     existente = db.query(models.TokenPush).filter(models.TokenPush.token == datos.token).first()
     if existente:
         existente.usuario_id = usuario_id
@@ -1753,6 +1774,8 @@ def eliminar_push_token(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if current_user["id"] != usuario_id:
+        raise HTTPException(status_code=403, detail="No puedes eliminar un token push de otro usuario")
     db.query(models.TokenPush).filter(
         models.TokenPush.usuario_id == usuario_id,
         models.TokenPush.token == datos.token,
@@ -1766,6 +1789,8 @@ def listar_notificaciones(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if current_user["id"] != usuario_id:
+        raise HTTPException(status_code=403, detail="No puedes ver las notificaciones de otro usuario")
     return db.query(models.Notificacion).filter(
         models.Notificacion.usuario_id == usuario_id
     ).order_by(models.Notificacion.creado_en.desc()).limit(50).all()
@@ -1808,6 +1833,7 @@ def actualizar_perfil_fontanero(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -1831,6 +1857,7 @@ def subir_foto_perfil(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -1865,6 +1892,7 @@ def activar_vacaciones(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -1882,6 +1910,7 @@ def cancelar_vacaciones(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -1903,6 +1932,7 @@ def subir_foto_galeria(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -1943,6 +1973,7 @@ def eliminar_foto_galeria(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -1968,6 +1999,7 @@ def ver_estadisticas(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -2007,6 +2039,7 @@ def descargar_resumen_fiscal(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     from fastapi.responses import Response
     try:
         from reportlab.pdfgen import canvas
@@ -2480,6 +2513,7 @@ def crear_cita(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -2501,6 +2535,7 @@ def ver_citas(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -2515,6 +2550,7 @@ def eliminar_cita(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -2706,6 +2742,7 @@ def historial_pagos(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -3173,6 +3210,7 @@ def subir_documento(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -3198,6 +3236,7 @@ def ver_documentos(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -3447,6 +3486,21 @@ def admin_revisar_documento(
 
 # ─── MENSAJES CHAT ────────────────────────────────────────────────────────────
 
+def _verificar_participante_servicio(db: Session, servicio_id: int, current_user: dict) -> models.Servicio:
+    """Solo el cliente o el profesional asignado a un servicio pueden leer o
+    escribir en su chat (evita leer/inyectar mensajes de conversaciones ajenas)."""
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    es_cliente = servicio.cliente_id == current_user["id"]
+    fontanero_actual = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == current_user["id"]
+    ).first()
+    es_fontanero = bool(fontanero_actual) and servicio.fontanero_id == fontanero_actual.id
+    if not es_cliente and not es_fontanero:
+        raise HTTPException(status_code=403, detail="No participas en este servicio")
+    return servicio
+
 class MensajeCrear(BaseModel):
     contenido: str
 
@@ -3457,9 +3511,7 @@ def enviar_mensaje(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio:
-        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    servicio = _verificar_participante_servicio(db, servicio_id, current_user)
     emisor_id = current_user["id"]
     emisor = db.query(models.Usuario).filter(models.Usuario.id == emisor_id).first()
     nuevo = models.Mensaje(
@@ -3493,9 +3545,7 @@ def enviar_mensaje_imagen(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio:
-        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    servicio = _verificar_participante_servicio(db, servicio_id, current_user)
     if archivo.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
     emisor_id = current_user["id"]
@@ -3536,6 +3586,7 @@ def ver_mensajes(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_participante_servicio(db, servicio_id, current_user)
     mensajes = db.query(models.Mensaje).filter(
         models.Mensaje.servicio_id == servicio_id
     ).order_by(models.Mensaje.creado_en).all()
@@ -3561,6 +3612,15 @@ class MensajeChatCrear(BaseModel):
 def _escapar_like(valor: str) -> str:
     return valor.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
+def _verificar_chat_id_propio(db: Session, chat_id: str, current_user: dict) -> None:
+    """chat_id identifica la conversación por el id del servicio al que pertenece:
+    solo el cliente o el profesional asignado a ese servicio puede leer/escribir."""
+    try:
+        servicio_id = int(chat_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=404, detail="Chat no encontrado")
+    _verificar_participante_servicio(db, servicio_id, current_user)
+
 @app.post("/chat/{chat_id}/mensajes")
 def enviar_mensaje_chat(
     chat_id: str,
@@ -3568,6 +3628,7 @@ def enviar_mensaje_chat(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_chat_id_propio(db, chat_id, current_user)
     nombre = mensaje.remitente_nombre or "Usuario"
     nuevo = models.Mensaje(
         servicio_id=0,
@@ -3592,6 +3653,7 @@ def ver_mensajes_chat(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_chat_id_propio(db, chat_id, current_user)
     mensajes = db.query(models.Mensaje).filter(
         models.Mensaje.texto.like(f"{_escapar_like(chat_id)}||%", escape="\\")
     ).order_by(models.Mensaje.creado_en).all()
