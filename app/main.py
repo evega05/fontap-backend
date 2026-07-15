@@ -1422,10 +1422,12 @@ def confirmar_efectivo(
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
+    if not fontanero_obj or fontanero_obj.usuario_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Solo el profesional asignado puede confirmar este cobro")
     servicio.estado = "pagado"
     # El efectivo va directo cliente→fontanero: la comisión de Multiservicios Provenza queda
     # pendiente de que el fontanero la liquide (ver /comision-pendiente).
-    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
     servicio.comision_aplicada = round((servicio.precio or 0) * _tasa_comision(fontanero_obj), 2)
     servicio.comision_liquidada = False
     _consumir_trabajo_gratis(fontanero_obj)
@@ -2806,14 +2808,28 @@ def confirmar_stripe(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=501, detail="Stripe no configurado.")
+    import stripe
+    stripe.api_key = STRIPE_SECRET_KEY
+
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    if servicio.cliente_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Solo el cliente puede confirmar este pago")
+    if not servicio.stripe_payment_intent:
+        raise HTTPException(status_code=400, detail="No hay sesión de pago para este servicio")
+    session = stripe.checkout.Session.retrieve(servicio.stripe_payment_intent)
+    if session.payment_status != "paid":
+        raise HTTPException(status_code=400, detail="El pago no se ha completado en Stripe")
+
     servicio.estado = "pagado"
     servicio.metodo_pago = "stripe"
     fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
     comision = round((servicio.precio or 0) * _tasa_comision(fontanero_obj), 2)
     servicio.comision_aplicada = comision
+    servicio.comision_liquidada = True
     _consumir_trabajo_gratis(fontanero_obj)
     if fontanero_obj and fontanero_obj.usuario_id:
         _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido por Stripe", f"Pago de {servicio.precio}€ confirmado", "pago_recibido", servicio_id)
