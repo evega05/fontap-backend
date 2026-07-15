@@ -106,6 +106,9 @@ def _limpiar_valoraciones_ficticias():
             f.valoracion = None
         if sin_resenas:
             db.commit()
+    except Exception as e:
+        print(f"[limpiar-valoraciones] Error: {e}")
+        db.rollback()
     finally:
         db.close()
 
