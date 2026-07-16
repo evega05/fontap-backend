@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, nullslast, inspect, text, func
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel
 from . import models, schemas, auth
 from .database import engine, get_db
@@ -607,6 +607,8 @@ def migrar_db(current_user: dict = Depends(auth.get_current_user)):
 @app.post("/registro", response_model=schemas.Token)
 def registrar_usuario(usuario: schemas.UsuarioRegistro, db: Session = Depends(get_db)):
     email = _norm_email(usuario.email)
+    if len(usuario.password) < 6:
+        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 6 caracteres")
     existe = db.query(models.Usuario).filter(models.Usuario.email == email).first()
     if existe:
         raise HTTPException(status_code=400, detail="Email ya registrado")
@@ -1545,9 +1547,7 @@ def ver_servicio(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio:
-        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    servicio = _verificar_participante_servicio(db, servicio_id, current_user)
     return schemas.ServicioRespuesta.from_orm_with_color(servicio)
 
 @app.put("/servicios/{servicio_id}/aceptar")
@@ -1620,7 +1620,7 @@ def enviar_precio(
     return {"mensaje": "Precio enviado al cliente", "precio": datos.precio}
 
 class PagoUpdate(BaseModel):
-    metodo: str
+    metodo: Literal["efectivo", "bizum"]
 
 @app.put("/servicios/{servicio_id}/pagar")
 def confirmar_pago(
@@ -1629,6 +1629,13 @@ def confirmar_pago(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    # Este endpoint SOLO registra la intención de pago para efectivo/bizum (que
+    # quedan "pendientes" hasta que el fontanero confirme haberlos recibido, ver
+    # /confirmar_efectivo y /confirmar_bizum). El pago con tarjeta NUNCA debe pasar
+    # por aquí: se marca "pagado" únicamente en /stripe/confirmar y /stripe/verificar,
+    # que comprueban de verdad contra Stripe que el cargo se hizo. Restringir
+    # `metodo` con Literal evita que cualquier otro valor salte directo a "pagado"
+    # sin haber pagado nada.
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
@@ -1636,25 +1643,20 @@ def confirmar_pago(
         raise HTTPException(status_code=403, detail="Solo el cliente puede confirmar el pago de este servicio")
     if not servicio.precio:
         raise HTTPException(status_code=400, detail="El fontanero aún no ha enviado el precio")
-    # Efectivo y Bizum van directo cliente→fontanero, sin que la app pueda comprobar
-    # que el dinero llegó de verdad: se quedan "pendientes" hasta que el propio
-    # fontanero confirme que lo recibió (ver /confirmar_efectivo y /confirmar_bizum).
-    nuevo_estado = "pago_pendiente" if datos.metodo in ("efectivo", "bizum") else "pagado"
+    nuevo_estado = "pago_pendiente"
     _registrar_auditoria(db, servicio.id, "estado", servicio.estado, nuevo_estado, current_user)
     servicio.estado = nuevo_estado
     servicio.metodo_pago = datos.metodo
     fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
-    if datos.metodo not in ["efectivo", "bizum", "stripe"]:
-        servicio.comision_aplicada = round(servicio.precio * _tasa_comision(fontanero_obj), 2)
-        servicio.comision_liquidada = False
-        _consumir_trabajo_gratis(fontanero_obj)
     if fontanero_obj and fontanero_obj.usuario_id:
         if datos.metodo == "bizum":
             _crear_notificacion(db, fontanero_obj.usuario_id, "📱 ¿Has recibido el Bizum?",
                                  f"El cliente dice haber pagado {servicio.precio}€ por Bizum. Confírmalo en la app en cuanto lo compruebes.",
                                  "bizum_pendiente", servicio.id)
         else:
-            _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido", f"El cliente ha confirmado el pago de {servicio.precio}€ via {datos.metodo}", "pago_recibido", servicio.id)
+            _crear_notificacion(db, fontanero_obj.usuario_id, "💶 ¿Has recibido el efectivo?",
+                                 f"El cliente dice haber pagado {servicio.precio}€ en efectivo. Confírmalo en la app en cuanto lo compruebes.",
+                                 "pago_pendiente_efectivo", servicio.id)
     db.commit()
     return {"mensaje": "Pago registrado", "precio": servicio.precio, "metodo": datos.metodo}
 
@@ -2801,6 +2803,11 @@ def listar_ofertas(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    if servicio.cliente_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Solo el cliente dueño del servicio puede ver sus ofertas")
     bloqueados = db.query(models.ListaNegraCliente.fontanero_id).filter(
         models.ListaNegraCliente.cliente_id == current_user["id"]
     )
