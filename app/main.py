@@ -532,6 +532,125 @@ def robots_txt():
     txt = f"User-agent: *\nAllow: /landing\nDisallow: /admin\nDisallow: /uploads\nSitemap: {base}/sitemap.xml\n"
     return Response(content=txt, media_type="text/plain")
 
+
+# ─── TÉRMINOS Y PRIVACIDAD (páginas públicas para App Store / Play Store) ──────
+# Apple y Google exigen una URL pública a la política de privacidad en la ficha
+# de la tienda; no basta con una pantalla dentro de la app.
+
+def _legal_page_html(titulo: str, subtitulo: str, secciones: list) -> str:
+    canonical_slug = "privacidad" if "privacidad" in titulo.lower() else "terminos"
+    canonical = f"{_landing_base_url()}/{canonical_slug}"
+    secciones_html = "".join(
+        f"<h2>{sec['titulo']}</h2><p>{sec['texto']}</p>" for sec in secciones
+    )
+    return f"""<!doctype html>
+<html lang="es">
+<head>
+{_landing_head(titulo, subtitulo, canonical, {
+    "@context": "https://schema.org", "@type": "WebPage", "name": titulo,
+})}
+</head>
+<body>
+<h1>{titulo}</h1>
+<p style="color:#8a94a6;font-size:13px;">{subtitulo}</p>
+{secciones_html}
+<footer>Multiservicios Provenza · <a href="mailto:soporte@fontap.app">soporte@fontap.app</a></footer>
+</body>
+</html>"""
+
+
+@app.get("/terminos", include_in_schema=False)
+def pagina_terminos():
+    from fastapi.responses import Response
+    secciones = [
+        {"titulo": "1. Qué es Multiservicios Provenza", "texto":
+            "Multiservicios Provenza es una plataforma de intermediación que conecta a clientes que necesitan un servicio "
+            "para el hogar (fontanería, electricidad, cerrajería y otros oficios) con profesionales independientes que ofrecen esos servicios. "
+            "Multiservicios Provenza no presta directamente estos servicios: actúa como intermediario entre ambas partes."},
+        {"titulo": "2. Registro y cuenta", "texto":
+            "Debes ser mayor de 18 años para registrarte y contratar o prestar servicios a través de Multiservicios Provenza. "
+            "Para usar Multiservicios Provenza debes registrarte con datos reales y mantener actualizada tu información de "
+            "contacto. Eres responsable de la actividad realizada desde tu cuenta y de la confidencialidad de "
+            "tu contraseña. Los profesionales declaran contar con la cualificación y, en su caso, los seguros "
+            "necesarios para ejercer su actividad."},
+        {"titulo": "3. Precios y pagos", "texto":
+            "El precio de cada servicio lo fija libremente el profesional y se muestra al cliente antes de "
+            "confirmar el pago. Multiservicios Provenza aplica una comisión sobre el importe cobrado por servicios pagados a "
+            "través de la plataforma. Los pagos en efectivo o Bizum se acuerdan directamente entre cliente y profesional; "
+            "Multiservicios Provenza no es responsable de disputas sobre pagos realizados fuera de la app."},
+        {"titulo": "4. Cancelaciones", "texto":
+            "Tanto el cliente como el profesional pueden cancelar una solicitud antes de que el servicio se "
+            "marque como pagado. Cancelaciones repetidas o de mala fe pueden dar lugar a la suspensión de la cuenta."},
+        {"titulo": "5. Reseñas", "texto":
+            "Al finalizar un servicio pagado, cliente y profesional pueden valorarse mutuamente. Las reseñas deben "
+            "reflejar experiencias reales; Multiservicios Provenza puede retirar reseñas falsas, ofensivas o que infrinjan estos términos."},
+        {"titulo": "6. Responsabilidad", "texto":
+            "Multiservicios Provenza no es parte del contrato de servicio entre cliente y profesional y no responde por la calidad, "
+            "seguridad o resultado del trabajo realizado. Cualquier incidencia relativa a la ejecución del servicio "
+            "debe resolverse entre las partes; Multiservicios Provenza puede mediar de buena fe pero no garantiza el resultado."},
+        {"titulo": "7. Protección de datos", "texto":
+            'Tratamos tus datos personales según nuestra <a href="/privacidad">Política de Privacidad</a>. '
+            "No vendemos tus datos a terceros. Puedes solicitar la eliminación de tu cuenta y datos asociados "
+            "en cualquier momento desde la app o escribiendo a soporte."},
+        {"titulo": "8. Cambios en estos términos", "texto":
+            "Podemos actualizar estos términos para reflejar cambios en el servicio o en la normativa aplicable. "
+            "Si los cambios son sustanciales, te avisaremos dentro de la app antes de que entren en vigor."},
+    ]
+    html = _legal_page_html(
+        "Términos y condiciones · Multiservicios Provenza",
+        "Última actualización: julio de 2026",
+        secciones,
+    )
+    return Response(content=html, media_type="text/html")
+
+
+@app.get("/privacidad", include_in_schema=False)
+def pagina_privacidad():
+    from fastapi.responses import Response
+    secciones = [
+        {"titulo": "1. Quién trata tus datos", "texto":
+            "Multiservicios Provenza es responsable del tratamiento de los datos personales que recoge a través de la app "
+            "y este sitio web. Para cualquier consulta sobre tus datos, escribe a soporte@fontap.app."},
+        {"titulo": "2. Qué datos recogemos", "texto":
+            "Nombre, email y teléfono al registrarte; ubicación aproximada mientras usas el mapa o solicitas un servicio "
+            "urgente; fotos que subas al chat, a tu perfil o como evidencia de un trabajo; documento de identidad (DNI/NIE) "
+            "de los profesionales, solo para verificar su identidad; historial de servicios, mensajes de chat y valoraciones; "
+            "y datos de pago procesados directamente por Stripe (no almacenamos números de tarjeta en nuestros servidores)."},
+        {"titulo": "3. Para qué los usamos y con qué base legal", "texto":
+            "Para prestar el servicio de intermediación (ejecución del contrato): mostrar tu solicitud a profesionales "
+            "cercanos, gestionar pagos, permitir el chat y los recordatorios de cita. Para verificar la identidad de los "
+            "profesionales y prevenir fraude (interés legítimo). Para enviarte notificaciones del servicio (ejecución del "
+            "contrato) y, si lo autorizas, sincronizar tu calendario de Google (consentimiento)."},
+        {"titulo": "4. Con quién compartimos datos", "texto":
+            "Con la otra parte de un servicio (cliente/profesional), lo mínimo necesario para completarlo. Con proveedores "
+            "que tratan datos en nuestro nombre: Stripe (pagos), Google (inicio de sesión, Google Calendar y mapas), y "
+            "nuestro proveedor de hosting para la base de datos y los archivos subidos. No vendemos tus datos a terceros "
+            "con fines publicitarios."},
+        {"titulo": "5. Documentos de identidad de profesionales", "texto":
+            "Las fotos de DNI/NIE que suben los profesionales para verificarse se usan exclusivamente para que el equipo "
+            "de Multiservicios Provenza confirme su identidad, con acceso restringido al panel de administración, y no se "
+            "muestran públicamente ni se comparten con clientes."},
+        {"titulo": "6. Cuánto tiempo conservamos los datos", "texto":
+            "Mientras tu cuenta esté activa. Si eliminas tu cuenta, borramos o anonimizamos tus datos personales salvo los "
+            "que debamos conservar por obligación legal (por ejemplo, facturación)."},
+        {"titulo": "7. Tus derechos", "texto":
+            "Puedes acceder a tus datos, corregirlos, solicitar su eliminación o pedir una copia de los mismos escribiendo "
+            "a soporte@fontap.app o, cuando esté disponible en la app, desde los ajustes de tu cuenta. También puedes "
+            "eliminar tu cuenta tú mismo en cualquier momento desde la app."},
+        {"titulo": "8. Menores de edad", "texto":
+            "Multiservicios Provenza no está dirigida a menores de 18 años y no permite el registro de menores."},
+        {"titulo": "9. Cambios en esta política", "texto":
+            "Podemos actualizar esta política para reflejar cambios en el servicio o en la normativa aplicable. Si los "
+            "cambios son sustanciales, te avisaremos dentro de la app antes de que entren en vigor."},
+    ]
+    html = _legal_page_html(
+        "Política de privacidad · Multiservicios Provenza",
+        "Última actualización: julio de 2026",
+        secciones,
+    )
+    return Response(content=html, media_type="text/html")
+
+
 def _estado_dependencias(db: Session):
     dependencias = []
 
