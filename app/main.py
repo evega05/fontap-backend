@@ -908,6 +908,7 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 class GoogleAuthDatos(BaseModel):
     id_token: str
     tipo: Optional[str] = "cliente"
+    nonce: Optional[str] = None
 
 @app.post("/auth/google", response_model=schemas.Token)
 def login_google(datos: GoogleAuthDatos, db: Session = Depends(get_db)):
@@ -932,6 +933,13 @@ def login_google(datos: GoogleAuthDatos, db: Session = Depends(get_db)):
         raise HTTPException(status_code=501, detail="Login con Google no configurado en el servidor")
     if info.get("aud") != GOOGLE_CLIENT_ID:
         raise HTTPException(status_code=401, detail="Token de Google no corresponde a esta app")
+    # El frontend genera un nonce por intento de login y lo manda de vuelta aquí:
+    # comprobarlo contra el que Google firmó dentro del id_token evita que un
+    # id_token capturado (red, logs, dispositivo comprometido) se reutilice más
+    # tarde en un login distinto. Opcional para no romper builds de la app ya
+    # publicadas que todavía no envían este campo.
+    if datos.nonce and info.get("nonce") != datos.nonce:
+        raise HTTPException(status_code=401, detail="Token de Google inválido (nonce no coincide)")
 
     email = _norm_email(info["email"])
     nombre = info.get("name") or email.split("@")[0]
