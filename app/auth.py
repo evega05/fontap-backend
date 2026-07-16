@@ -1,4 +1,5 @@
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 import bcrypt
@@ -9,7 +10,15 @@ from sqlalchemy.orm import Session
 from . import models
 from .database import get_db
 
-SECRET_KEY = os.environ.get("SECRET_KEY", "fontap_dev_secret_key_cambia_en_produccion")
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    # Sin SECRET_KEY en el entorno, cualquiera podría firmar JWTs válidos si usáramos
+    # un valor por defecto fijo (el código es público). Generamos uno aleatorio por
+    # proceso: es seguro, aunque invalida las sesiones existentes en cada reinicio.
+    print("[auth] AVISO: falta la variable de entorno SECRET_KEY. Generando una "
+          "clave aleatoria temporal (las sesiones no sobrevivirán un reinicio). "
+          "Define SECRET_KEY en las variables de entorno de producción.")
+    SECRET_KEY = secrets.token_hex(32)
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 

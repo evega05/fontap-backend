@@ -184,7 +184,11 @@ app = FastAPI(title="Multiservicios Provenza API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    # La API solo usa Bearer tokens en el header Authorization (no cookies), así que
+    # allow_credentials no aporta nada aquí. Con allow_origins=["*"], dejarlo en True
+    # hace que el middleware refleje el Origin de la request en vez de mandar "*",
+    # lo que permite peticiones "credenciadas" desde cualquier origen sin necesidad.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
