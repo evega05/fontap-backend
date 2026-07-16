@@ -1127,7 +1127,13 @@ def eliminar_cuenta(
 # ─── FONTANEROS ────────────────────────────────────────────────────────────────
 
 @app.get("/fontaneros", response_model=List[schemas.FontaneroRespuesta])
-def listar_fontaneros(gremio: Optional[str] = None, ciudad: Optional[str] = None, cliente_id: Optional[int] = None, db: Session = Depends(get_db)):
+def listar_fontaneros(
+    gremio: Optional[str] = None,
+    ciudad: Optional[str] = None,
+    cliente_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
     # Excluye profesionales cuyo usuario esté vetado por el admin
     query = db.query(models.Fontanero).outerjoin(
         models.Usuario, models.Fontanero.usuario_id == models.Usuario.id
@@ -2255,7 +2261,7 @@ def subir_foto_perfil(
 def ver_perfil_fontanero(
     fontanero_id: int,
     db: Session = Depends(get_db),
-    current_user: Optional[dict] = Depends(auth.get_current_user_opcional),
+    current_user: dict = Depends(auth.get_current_user),
 ):
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
@@ -2265,7 +2271,7 @@ def ver_perfil_fontanero(
     item = schemas.FontaneroRespuesta.model_validate(fontanero)
     # El código de referido solo le sirve al propio profesional (para compartirlo);
     # a cualquier otra persona que consulte este perfil público no se le expone.
-    if not current_user or current_user.get("id") != fontanero_id:
+    if current_user.get("id") != fontanero_id:
         item.codigo_referido = None
     return item
 
@@ -2456,7 +2462,11 @@ def ver_estadisticas(
     ).all()
 
     trabajos_completados = len(servicios_pagados)
-    ingresos_totales = sum(s.precio for s in servicios_pagados if s.precio) * 0.95
+    # Comisión real por servicio (ya considera trabajos gratis, comisión reducida por
+    # referido, etc.) en vez de un 5% fijo que no coincide con lo realmente cobrado.
+    ingresos_totales = sum(
+        (s.precio or 0) - (s.comision_aplicada or 0) for s in servicios_pagados
+    )
 
     aceptados = db.query(models.Servicio).filter(
         models.Servicio.fontanero_id == fontanero.id,
@@ -2599,6 +2609,7 @@ def buscar_fontaneros(
     disponible_24h: Optional[bool] = None,
     verificado: Optional[bool] = None,
     db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
 ):
     q = db.query(models.Fontanero).filter(models.Fontanero.disponible == True)
     if zona:
@@ -3489,7 +3500,9 @@ def historial_pagos(
     resultado = []
     for s in servicios:
         cliente = db.query(models.Usuario).filter(models.Usuario.id == s.cliente_id).first()
-        comision = round(s.precio * 0.05, 2)
+        # Comisión real aplicada a este servicio (no un 5% fijo, que no refleja
+        # trabajos gratis ni la comisión reducida por referido).
+        comision = round(s.comision_aplicada or 0, 2)
         resultado.append({
             "servicio_id": s.id,
             "tipo": s.tipo,
@@ -3979,7 +3992,9 @@ def admin_estadisticas(
         models.Servicio.estado == "pagado",
         models.Servicio.precio != None,
     ).all()
-    ingresos = sum(s.precio * 0.05 for s in pagados if s.precio)
+    # Comisión real cobrada por servicio, no un 5% fijo (que no refleja trabajos
+    # gratis ni la comisión reducida por referido).
+    ingresos = sum(s.comision_aplicada or 0 for s in pagados)
     dinero_movido = sum(s.precio for s in pagados if s.precio)
     comisiones_pendientes = sum(
         (s.comision_aplicada or 0) for s in db.query(models.Servicio).filter(
