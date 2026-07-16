@@ -1145,7 +1145,7 @@ def listar_fontaneros(
         query = query.filter(models.Fontanero.gremio == gremio)
     if ciudad:
         query = query.filter(func.lower(models.Fontanero.zona) == ciudad.lower())
-    if cliente_id:
+    if cliente_id and cliente_id == current_user["id"]:
         bloqueados = db.query(models.ListaNegraCliente.fontanero_id).filter(
             models.ListaNegraCliente.cliente_id == cliente_id
         )
@@ -1282,12 +1282,16 @@ def ver_solicitudes_fontanero(
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
 
+    bloqueado_por = db.query(models.ListaNegraCliente.cliente_id).filter(
+        models.ListaNegraCliente.fontanero_id == fontanero.id
+    )
     pendientes = db.query(models.Servicio).filter(
         models.Servicio.estado == "pendiente",
         or_(
             models.Servicio.fontanero_id == None,
             models.Servicio.fontanero_id == fontanero.id,
         ),
+        ~models.Servicio.cliente_id.in_(bloqueado_por),
     ).all()
 
     propias = db.query(models.Servicio).filter(
@@ -1389,6 +1393,14 @@ def listar_servicios_abiertos(
     )
     if gremio:
         query = query.filter(models.Servicio.gremio == gremio)
+    fontanero_actual = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == current_user["id"]
+    ).first()
+    if fontanero_actual:
+        bloqueado_por = db.query(models.ListaNegraCliente.cliente_id).filter(
+            models.ListaNegraCliente.fontanero_id == fontanero_actual.id
+        )
+        query = query.filter(~models.Servicio.cliente_id.in_(bloqueado_por))
     servicios = query.order_by(models.Servicio.id.desc()).all()
     resultado = []
     for s in servicios:
@@ -1624,6 +1636,12 @@ def aceptar_servicio(
     ).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    bloqueado = db.query(models.ListaNegraCliente).filter(
+        models.ListaNegraCliente.cliente_id == servicio.cliente_id,
+        models.ListaNegraCliente.fontanero_id == fontanero.id,
+    ).first()
+    if bloqueado:
+        raise HTTPException(status_code=403, detail="Este cliente te ha bloqueado")
     # UPDATE...WHERE atómico en vez de leer-y-luego-escribir: si dos fontaneros
     # aceptan el mismo servicio abierto a la vez, solo uno de los dos UPDATE
     # afecta una fila (el otro llega tarde y ve fontanero_id ya distinto al suyo).
@@ -3001,11 +3019,16 @@ def aceptar_oferta(
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
     if servicio.cliente_id != current_user["id"]:
         raise HTTPException(status_code=403, detail="Solo el cliente puede aceptar ofertas de este servicio")
-    if servicio.estado != "pendiente":
+    # UPDATE...WHERE atómico en vez de leer-y-luego-escribir: evita que dos ofertas
+    # del mismo servicio se acepten a la vez (mismo patrón que aceptar_servicio).
+    filas = db.query(models.Servicio).filter(
+        models.Servicio.id == servicio_id,
+        models.Servicio.estado == "pendiente",
+    ).update({"fontanero_id": oferta.fontanero_id, "precio": oferta.precio, "estado": "aceptado"}, synchronize_session=False)
+    if filas == 0:
+        db.rollback()
         raise HTTPException(status_code=400, detail=f"Este servicio ya no admite aceptar ofertas (estado: {servicio.estado})")
-    servicio.fontanero_id = oferta.fontanero_id
-    servicio.precio = oferta.precio
-    servicio.estado = "aceptado"
+    db.refresh(servicio)
     oferta.estado = "aceptada"
     db.query(models.Oferta).filter(
         models.Oferta.servicio_id == servicio_id,
