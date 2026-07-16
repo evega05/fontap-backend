@@ -677,26 +677,38 @@ def registrar_usuario(usuario: schemas.UsuarioRegistro, db: Session = Depends(ge
     }
 
 # Protección contra fuerza bruta: tras varios fallos seguidos con un mismo email,
-# se bloquea temporalmente el login de ese email. En memoria (se reinicia con el proceso).
+# se bloquea temporalmente ese email para el `scope` en cuestión (login, o probar
+# códigos de reseteo/verificación). En memoria (se reinicia con el proceso).
 MAX_INTENTOS_LOGIN = 5
 BLOQUEO_LOGIN_MINUTOS = 15
-_intentos_login = {}  # email -> {"fallos": int, "bloqueado_hasta": datetime | None}
+_intentos_por_scope = {}  # (scope, email) -> {"fallos": int, "bloqueado_hasta": datetime | None}
 
-def _login_bloqueado(email: str):
-    registro = _intentos_login.get(email)
+def _intento_bloqueado(scope: str, email: str, max_intentos: int = MAX_INTENTOS_LOGIN, minutos_bloqueo: int = BLOQUEO_LOGIN_MINUTOS):
+    clave = (scope, email)
+    registro = _intentos_por_scope.get(clave)
     if not registro or not registro.get("bloqueado_hasta"):
         return None
     restante = registro["bloqueado_hasta"] - datetime.datetime.utcnow()
     if restante.total_seconds() <= 0:
-        _intentos_login.pop(email, None)
+        _intentos_por_scope.pop(clave, None)
         return None
     return int(restante.total_seconds() // 60) + 1
 
-def _registrar_fallo_login(email: str):
-    registro = _intentos_login.setdefault(email, {"fallos": 0, "bloqueado_hasta": None})
+def _registrar_fallo(scope: str, email: str, max_intentos: int = MAX_INTENTOS_LOGIN, minutos_bloqueo: int = BLOQUEO_LOGIN_MINUTOS):
+    clave = (scope, email)
+    registro = _intentos_por_scope.setdefault(clave, {"fallos": 0, "bloqueado_hasta": None})
     registro["fallos"] += 1
-    if registro["fallos"] >= MAX_INTENTOS_LOGIN:
-        registro["bloqueado_hasta"] = datetime.datetime.utcnow() + datetime.timedelta(minutes=BLOQUEO_LOGIN_MINUTOS)
+    if registro["fallos"] >= max_intentos:
+        registro["bloqueado_hasta"] = datetime.datetime.utcnow() + datetime.timedelta(minutes=minutos_bloqueo)
+
+def _limpiar_intentos(scope: str, email: str):
+    _intentos_por_scope.pop((scope, email), None)
+
+def _login_bloqueado(email: str):
+    return _intento_bloqueado("login", email)
+
+def _registrar_fallo_login(email: str):
+    _registrar_fallo("login", email)
 
 @app.post("/login", response_model=schemas.Token)
 def login(datos: schemas.UsuarioLogin, db: Session = Depends(get_db)):
@@ -713,7 +725,7 @@ def login(datos: schemas.UsuarioLogin, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
     if usuario.bloqueado:
         raise HTTPException(status_code=403, detail="Esta cuenta ha sido suspendida. Contacta con soporte")
-    _intentos_login.pop(email_normalizado, None)
+    _limpiar_intentos("login", email_normalizado)
     token = auth.crear_token({"sub": usuario.email, "tipo": usuario.tipo, "id": usuario.id})
     return {
         "access_token": token,
@@ -790,11 +802,19 @@ class ResetPasswordDatos(BaseModel):
     token: str
     nueva_password: str
 
+MAX_INTENTOS_CODIGO = 8
+BLOQUEO_CODIGO_MINUTOS = 15
+
 @app.post("/auth/resetear-password")
 def resetear_password(datos: ResetPasswordDatos, db: Session = Depends(get_db)):
-    usuario = db.query(models.Usuario).filter(models.Usuario.email == _norm_email(datos.email)).first()
+    email_normalizado = _norm_email(datos.email)
+    minutos = _intento_bloqueado("reset", email_normalizado, MAX_INTENTOS_CODIGO, BLOQUEO_CODIGO_MINUTOS)
+    if minutos:
+        raise HTTPException(status_code=429, detail=f"Demasiados intentos. Inténtalo de nuevo en {minutos} min")
+    usuario = db.query(models.Usuario).filter(models.Usuario.email == email_normalizado).first()
     error_generico = HTTPException(status_code=400, detail="Código inválido o caducado")
     if not usuario:
+        _registrar_fallo("reset", email_normalizado, MAX_INTENTOS_CODIGO, BLOQUEO_CODIGO_MINUTOS)
         raise error_generico
     reset = db.query(models.PasswordReset).filter(
         models.PasswordReset.usuario_id == usuario.id,
@@ -802,11 +822,13 @@ def resetear_password(datos: ResetPasswordDatos, db: Session = Depends(get_db)):
         models.PasswordReset.usado == False,
     ).order_by(models.PasswordReset.id.desc()).first()
     if not reset or reset.expira < datetime.datetime.utcnow():
+        _registrar_fallo("reset", email_normalizado, MAX_INTENTOS_CODIGO, BLOQUEO_CODIGO_MINUTOS)
         raise error_generico
     if len(datos.nueva_password) < 6:
         raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 6 caracteres")
     usuario.password_hash = auth.hashear_password(datos.nueva_password)
     reset.usado = True
+    _limpiar_intentos("reset", email_normalizado)
     db.commit()
     return {"mensaje": "Contraseña actualizada"}
 
@@ -816,9 +838,14 @@ class VerificarEmailDatos(BaseModel):
 
 @app.post("/auth/verificar-email")
 def verificar_email(datos: VerificarEmailDatos, db: Session = Depends(get_db)):
-    usuario = db.query(models.Usuario).filter(models.Usuario.email == _norm_email(datos.email)).first()
+    email_normalizado = _norm_email(datos.email)
+    minutos = _intento_bloqueado("verify", email_normalizado, MAX_INTENTOS_CODIGO, BLOQUEO_CODIGO_MINUTOS)
+    if minutos:
+        raise HTTPException(status_code=429, detail=f"Demasiados intentos. Inténtalo de nuevo en {minutos} min")
+    usuario = db.query(models.Usuario).filter(models.Usuario.email == email_normalizado).first()
     error_generico = HTTPException(status_code=400, detail="Código inválido o caducado")
     if not usuario:
+        _registrar_fallo("verify", email_normalizado, MAX_INTENTOS_CODIGO, BLOQUEO_CODIGO_MINUTOS)
         raise error_generico
     if usuario.email_verificado:
         return {"mensaje": "Email ya verificado"}
@@ -828,9 +855,11 @@ def verificar_email(datos: VerificarEmailDatos, db: Session = Depends(get_db)):
         models.VerificacionEmail.usado == False,
     ).order_by(models.VerificacionEmail.id.desc()).first()
     if not verificacion or verificacion.expira < datetime.datetime.utcnow():
+        _registrar_fallo("verify", email_normalizado, MAX_INTENTOS_CODIGO, BLOQUEO_CODIGO_MINUTOS)
         raise error_generico
     usuario.email_verificado = True
     verificacion.usado = True
+    _limpiar_intentos("verify", email_normalizado)
     db.commit()
     return {"mensaje": "Email verificado"}
 
@@ -872,7 +901,12 @@ def login_google(datos: GoogleAuthDatos, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="No se pudo verificar el token de Google")
     if resp.status_code != 200 or "email" not in info:
         raise HTTPException(status_code=401, detail="Token de Google inválido")
-    if GOOGLE_CLIENT_ID and info.get("aud") != GOOGLE_CLIENT_ID:
+    if not GOOGLE_CLIENT_ID:
+        # Sin GOOGLE_CLIENT_ID configurado no hay forma de comprobar que el token es
+        # para esta app: mejor rechazar que aceptar cualquier id_token válido emitido
+        # para OTRA aplicación de Google (confusión de audiencia).
+        raise HTTPException(status_code=501, detail="Login con Google no configurado en el servidor")
+    if info.get("aud") != GOOGLE_CLIENT_ID:
         raise HTTPException(status_code=401, detail="Token de Google no corresponde a esta app")
 
     email = _norm_email(info["email"])
@@ -1650,6 +1684,8 @@ def confirmar_pago(
         raise HTTPException(status_code=403, detail="Solo el cliente puede confirmar el pago de este servicio")
     if not servicio.precio:
         raise HTTPException(status_code=400, detail="El fontanero aún no ha enviado el precio")
+    if servicio.estado == "pagado":
+        raise HTTPException(status_code=400, detail="Este servicio ya está pagado")
     nuevo_estado = "pago_pendiente"
     _registrar_auditoria(db, servicio.id, "estado", servicio.estado, nuevo_estado, current_user)
     servicio.estado = nuevo_estado
@@ -1677,6 +1713,8 @@ def _confirmar_pago_directo(db: Session, servicio_id: int, current_user: dict, e
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
     if not fontanero or servicio.fontanero_id != fontanero.id:
         raise HTTPException(status_code=403, detail="Este servicio no es tuyo")
+    if servicio.estado == "pagado":
+        raise HTTPException(status_code=400, detail="Este servicio ya está marcado como pagado")
     _registrar_auditoria(db, servicio.id, "estado", servicio.estado, "pagado", current_user)
     servicio.estado = "pagado"
     servicio.comision_aplicada = round((servicio.precio or 0) * _tasa_comision(fontanero), 2)
@@ -1914,6 +1952,29 @@ ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 # filtro se podía subir cualquier extensión (p. ej. .html/.svg) que luego se sirve
 # públicamente desde /uploads, con riesgo de contenido activo servido en el mismo origen.
 ALLOWED_DOCUMENT_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf"}
+# El Content-Type de un multipart lo elige el cliente y no es de fiar, pero solo se
+# usa para RECHAZAR (arriba). La extensión con la que se guarda en disco NUNCA debe
+# salir del filename que manda el cliente (podría ser "x.html"/"x.svg" con
+# Content-Type falseado a "image/jpeg" y servirse como contenido activo desde
+# /uploads); se deriva siempre de este mapa fijo, ya validado contra la whitelist.
+_EXT_POR_CONTENT_TYPE = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "application/pdf": "pdf",
+}
+
+def _extension_segura(content_type: str, por_defecto: str = "jpg") -> str:
+    return _EXT_POR_CONTENT_TYPE.get(content_type, por_defecto)
+
+MAX_TAMANO_ARCHIVO = 15 * 1024 * 1024  # 15 MB
+
+def _leer_archivo_limitado(archivo: UploadFile, max_bytes: int = MAX_TAMANO_ARCHIVO) -> bytes:
+    contenido = archivo.file.read(max_bytes + 1)
+    if len(contenido) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"El archivo supera el tamaño máximo permitido ({max_bytes // (1024*1024)} MB)")
+    return contenido
 
 def _marcar_fecha_hora(ruta: str):
     """Estampa fecha/hora (y la marca) en la foto, como prueba de que el trabajo
@@ -1948,11 +2009,11 @@ def subir_imagen_servicio(
     servicio = _verificar_participante_servicio(db, servicio_id, current_user)
     if archivo.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
-    ext = archivo.filename.rsplit(".", 1)[-1] if "." in archivo.filename else "jpg"
+    ext = _extension_segura(archivo.content_type, "jpg")
     nombre_archivo = f"{uuid.uuid4().hex}.{ext}"
     ruta = os.path.join(UPLOAD_DIR, nombre_archivo)
     with open(ruta, "wb") as f:
-        f.write(archivo.file.read())
+        f.write(_leer_archivo_limitado(archivo))
     _marcar_fecha_hora(ruta)
     imagen = models.ImagenServicio(servicio_id=servicio_id, url=f"/uploads/{nombre_archivo}")
     db.add(imagen)
@@ -2159,11 +2220,11 @@ def subir_foto_perfil(
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
     if archivo.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
-    ext = archivo.filename.rsplit(".", 1)[-1] if "." in archivo.filename else "jpg"
+    ext = _extension_segura(archivo.content_type, "jpg")
     nombre_archivo = f"perfil_{uuid.uuid4().hex}.{ext}"
     ruta = os.path.join(UPLOAD_DIR, nombre_archivo)
     with open(ruta, "wb") as f:
-        f.write(archivo.file.read())
+        f.write(_leer_archivo_limitado(archivo))
     fontanero.foto_url = f"/uploads/{nombre_archivo}"
     db.commit()
     return {"foto_url": fontanero.foto_url}
@@ -2264,11 +2325,11 @@ def subir_foto_galeria(
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
     if archivo.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
-    ext = archivo.filename.rsplit(".", 1)[-1] if "." in archivo.filename else "jpg"
+    ext = _extension_segura(archivo.content_type, "jpg")
     nombre_archivo = f"galeria_{uuid.uuid4().hex}.{ext}"
     ruta = os.path.join(UPLOAD_DIR, nombre_archivo)
     with open(ruta, "wb") as f:
-        f.write(archivo.file.read())
+        f.write(_leer_archivo_limitado(archivo))
     foto = models.GaleriaFontanero(
         fontanero_id=fontanero.id,
         url=f"/uploads/{nombre_archivo}",
@@ -3424,6 +3485,8 @@ def crear_stripe_checkout(
         raise HTTPException(status_code=400, detail="Servicio no encontrado o sin precio")
     if servicio.cliente_id != current_user["id"]:
         raise HTTPException(status_code=403, detail="Solo el cliente puede pagar este servicio")
+    if servicio.estado == "pagado":
+        raise HTTPException(status_code=400, detail="Este servicio ya está pagado")
 
     fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
 
@@ -3754,11 +3817,11 @@ def subir_documento(
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
     if archivo.content_type not in ALLOWED_DOCUMENT_TYPES:
         raise HTTPException(status_code=400, detail="Tipo de archivo no permitido. Sube una foto (JPEG/PNG/WEBP) o un PDF")
-    ext = archivo.filename.rsplit(".", 1)[-1] if "." in archivo.filename else "pdf"
+    ext = _extension_segura(archivo.content_type, "pdf")
     nombre_archivo = f"doc_{uuid.uuid4().hex}.{ext}"
     ruta = os.path.join(UPLOAD_DIR, nombre_archivo)
     with open(ruta, "wb") as f:
-        f.write(archivo.file.read())
+        f.write(_leer_archivo_limitado(archivo))
     doc = models.DocumentoVerificacion(
         fontanero_id=fontanero.id,
         tipo=tipo,
@@ -4208,11 +4271,11 @@ def enviar_mensaje_imagen(
         raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
     emisor_id = current_user["id"]
     emisor = db.query(models.Usuario).filter(models.Usuario.id == emisor_id).first()
-    ext = archivo.filename.rsplit(".", 1)[-1] if "." in archivo.filename else "jpg"
+    ext = _extension_segura(archivo.content_type, "jpg")
     nombre_archivo = f"{uuid.uuid4().hex}.{ext}"
     ruta = os.path.join(UPLOAD_DIR, nombre_archivo)
     with open(ruta, "wb") as f:
-        f.write(archivo.file.read())
+        f.write(_leer_archivo_limitado(archivo))
     nuevo = models.Mensaje(
         servicio_id=servicio_id,
         emisor_id=emisor_id,
@@ -4286,12 +4349,17 @@ def enviar_mensaje_chat(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    # remitente_tipo/remitente_nombre NUNCA deben salir del body: un participante
+    # del chat podría hacerse pasar por el otro rol o por un nombre distinto (p. ej.
+    # "Soporte Multiservicios Provenza"). Se derivan del usuario autenticado.
     _verificar_chat_id_propio(db, chat_id, current_user)
-    nombre = mensaje.remitente_nombre or "Usuario"
+    emisor = db.query(models.Usuario).filter(models.Usuario.id == current_user["id"]).first()
+    remitente_tipo = emisor.tipo if emisor else current_user.get("tipo", "cliente")
+    nombre = (emisor.nombre if emisor and emisor.nombre else None) or "Usuario"
     nuevo = models.Mensaje(
         servicio_id=0,
         emisor_id=current_user["id"],
-        texto=f"{chat_id}||{mensaje.remitente_tipo}||{nombre}||{mensaje.contenido}",
+        texto=f"{chat_id}||{remitente_tipo}||{nombre}||{mensaje.contenido}",
         leido=False,
     )
     db.add(nuevo)
@@ -4300,7 +4368,7 @@ def enviar_mensaje_chat(
     return {
         "id": nuevo.id,
         "contenido": mensaje.contenido,
-        "remitente_tipo": mensaje.remitente_tipo,
+        "remitente_tipo": remitente_tipo,
         "remitente_nombre": nombre,
         "creado_en": str(nuevo.creado_en),
     }
