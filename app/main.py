@@ -3122,6 +3122,29 @@ def _google_calendar_redirect_uri() -> str:
     return f"{base_url}/auth/google/calendar/callback"
 
 
+def _google_login_redirect_uri() -> str:
+    base_url = os.getenv("BACKEND_URL", "https://fontap-backend-production.up.railway.app")
+    return f"{base_url}/auth/google/login/callback"
+
+
+@app.get("/auth/google/login/callback")
+def google_login_callback():
+    """Google solo admite un redirect_uri con dominio real (rechaza fontap:///),
+    así que 'Sign in with Google' vuelve primero aquí. Google deja el id_token
+    en el fragmento de la URL (#...), que nunca llega al servidor; esta página
+    solo lo lee en el navegador y lo reenvía al esquema propio de la app, que
+    expo-web-browser sí puede capturar (solo funciona en un build real, no en
+    Expo Go)."""
+    from fastapi.responses import Response
+    html = (
+        "<!doctype html><html><body style='font-family:sans-serif;text-align:center;padding:60px 20px;'>"
+        "<p>Conectando con Google…</p>"
+        "<script>window.location.replace('fontap:///?' + window.location.hash.substring(1));</script>"
+        "</body></html>"
+    )
+    return Response(content=html, media_type="text/html")
+
+
 def _google_calendar_access_token(fontanero) -> Optional[str]:
     if not (fontanero and fontanero.google_calendar_refresh_token and GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET):
         return None
