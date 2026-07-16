@@ -1655,6 +1655,8 @@ def enviar_precio(
     ).first()
     if not fontanero or servicio.fontanero_id != fontanero.id:
         raise HTTPException(status_code=403, detail="No puedes enviar precio para un servicio que no es tuyo")
+    if servicio.estado in ("pago_pendiente", "pagado", "cancelado", "rechazado"):
+        raise HTTPException(status_code=400, detail=f"No puedes cambiar el precio de un servicio en estado {servicio.estado}")
     _registrar_auditoria(db, servicio.id, "precio", servicio.precio, datos.precio, current_user)
     _registrar_auditoria(db, servicio.id, "estado", servicio.estado, "precio_enviado", current_user)
     servicio.precio = datos.precio
@@ -1716,8 +1718,8 @@ def _confirmar_pago_directo(db: Session, servicio_id: int, current_user: dict, e
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
     if not fontanero or servicio.fontanero_id != fontanero.id:
         raise HTTPException(status_code=403, detail="Este servicio no es tuyo")
-    if servicio.estado == "pagado":
-        raise HTTPException(status_code=400, detail="Este servicio ya está marcado como pagado")
+    if servicio.estado != "pago_pendiente":
+        raise HTTPException(status_code=400, detail=f"No hay un pago pendiente de confirmar para este servicio (estado: {servicio.estado})")
     _registrar_auditoria(db, servicio.id, "estado", servicio.estado, "pagado", current_user)
     servicio.estado = "pagado"
     servicio.comision_aplicada = round((servicio.precio or 0) * _tasa_comision(fontanero), 2)
@@ -2827,6 +2829,8 @@ def crear_oferta(
     ).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    if servicio.estado != "pendiente":
+        raise HTTPException(status_code=400, detail="Este servicio ya no admite nuevas ofertas")
 
     if datos.materiales is not None and datos.mano_obra is not None:
         precio_final = datos.materiales + datos.mano_obra
@@ -2918,6 +2922,8 @@ def aceptar_oferta(
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
     if servicio.cliente_id != current_user["id"]:
         raise HTTPException(status_code=403, detail="Solo el cliente puede aceptar ofertas de este servicio")
+    if servicio.estado != "pendiente":
+        raise HTTPException(status_code=400, detail=f"Este servicio ya no admite aceptar ofertas (estado: {servicio.estado})")
     servicio.fontanero_id = oferta.fontanero_id
     servicio.precio = oferta.precio
     servicio.estado = "aceptado"
@@ -4325,78 +4331,6 @@ def ver_mensajes(
             "remitente_nombre": emisor.nombre if emisor else "Usuario",
             "creado_en": str(m.creado_en),
         })
-    return resultado
-# ─── CHAT GENERAL ─────────────────────────────────────────────────────────────
-
-class MensajeChatCrear(BaseModel):
-    contenido: str
-    remitente_tipo: str
-    remitente_nombre: Optional[str] = None
-
-def _escapar_like(valor: str) -> str:
-    return valor.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-def _verificar_chat_id_propio(db: Session, chat_id: str, current_user: dict) -> None:
-    """chat_id identifica la conversación por el id del servicio al que pertenece:
-    solo el cliente o el profesional asignado a ese servicio puede leer/escribir."""
-    try:
-        servicio_id = int(chat_id)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=404, detail="Chat no encontrado")
-    _verificar_participante_servicio(db, servicio_id, current_user)
-
-@app.post("/chat/{chat_id}/mensajes")
-def enviar_mensaje_chat(
-    chat_id: str,
-    mensaje: MensajeChatCrear,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(auth.get_current_user),
-):
-    # remitente_tipo/remitente_nombre NUNCA deben salir del body: un participante
-    # del chat podría hacerse pasar por el otro rol o por un nombre distinto (p. ej.
-    # "Soporte Multiservicios Provenza"). Se derivan del usuario autenticado.
-    _verificar_chat_id_propio(db, chat_id, current_user)
-    emisor = db.query(models.Usuario).filter(models.Usuario.id == current_user["id"]).first()
-    remitente_tipo = emisor.tipo if emisor else current_user.get("tipo", "cliente")
-    nombre = (emisor.nombre if emisor and emisor.nombre else None) or "Usuario"
-    nuevo = models.Mensaje(
-        servicio_id=0,
-        emisor_id=current_user["id"],
-        texto=f"{chat_id}||{remitente_tipo}||{nombre}||{mensaje.contenido}",
-        leido=False,
-    )
-    db.add(nuevo)
-    db.commit()
-    db.refresh(nuevo)
-    return {
-        "id": nuevo.id,
-        "contenido": mensaje.contenido,
-        "remitente_tipo": remitente_tipo,
-        "remitente_nombre": nombre,
-        "creado_en": str(nuevo.creado_en),
-    }
-
-@app.get("/chat/{chat_id}/mensajes")
-def ver_mensajes_chat(
-    chat_id: str,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(auth.get_current_user),
-):
-    _verificar_chat_id_propio(db, chat_id, current_user)
-    mensajes = db.query(models.Mensaje).filter(
-        models.Mensaje.texto.like(f"{_escapar_like(chat_id)}||%", escape="\\")
-    ).order_by(models.Mensaje.creado_en).all()
-    resultado = []
-    for m in mensajes:
-        partes = m.texto.split("||", 3)
-        if len(partes) == 4:
-            resultado.append({
-                "id": m.id,
-                "contenido": partes[3],
-                "remitente_tipo": partes[1],
-                "remitente_nombre": partes[2],
-                "creado_en": str(m.creado_en),
-            })
     return resultado
 # ─── RECORDATORIOS DE CITAS ────────────────────────────────────────────────────
 # Hilo en segundo plano: cada 5 minutos revisa las citas próximas y avisa
