@@ -1,4 +1,5 @@
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 import bcrypt
@@ -9,11 +10,20 @@ from sqlalchemy.orm import Session
 from . import models
 from .database import get_db
 
-SECRET_KEY = os.environ.get("SECRET_KEY", "fontap_dev_secret_key_cambia_en_produccion")
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    # Sin SECRET_KEY en el entorno, cualquiera podría firmar JWTs válidos si usáramos
+    # un valor por defecto fijo (el código es público). Generamos uno aleatorio por
+    # proceso: es seguro, aunque invalida las sesiones existentes en cada reinicio.
+    print("[auth] AVISO: falta la variable de entorno SECRET_KEY. Generando una "
+          "clave aleatoria temporal (las sesiones no sobrevivirán un reinicio). "
+          "Define SECRET_KEY en las variables de entorno de producción.")
+    SECRET_KEY = secrets.token_hex(32)
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+oauth2_scheme_opcional = OAuth2PasswordBearer(tokenUrl="login", auto_error=False)
 
 def verificar_password(password, hash):
     return bcrypt.checkpw(password.encode("utf-8"), hash.encode("utf-8"))
@@ -59,3 +69,14 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
                 headers={"WWW-Authenticate": "Bearer"},
             )
     return payload
+
+def get_current_user_opcional(token: str = Depends(oauth2_scheme_opcional), db: Session = Depends(get_db)):
+    """Igual que get_current_user pero para endpoints públicos que quieren saber
+    'quién sos si estás logueado' sin exigir login: sin token, o con uno inválido
+    o de una cuenta vetada, devuelve None en vez de lanzar 401."""
+    if not token:
+        return None
+    try:
+        return get_current_user(token, db)
+    except HTTPException:
+        return None
