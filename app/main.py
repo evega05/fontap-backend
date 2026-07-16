@@ -2617,9 +2617,7 @@ def clasificar_urgencia(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio:
-        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    servicio = _verificar_participante_servicio(db, servicio_id, current_user)
     nivel = _clasificar_urgencia(f"{servicio.tipo} {servicio.descripcion or ''}")
     servicio.urgencia_ia = nivel
     db.commit()
@@ -3626,6 +3624,8 @@ def estado_stripe_fontanero(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if fontanero_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="No puedes ver el estado de Stripe de otro fontanero")
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
