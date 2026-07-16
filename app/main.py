@@ -1639,8 +1639,8 @@ def confirmar_pago(
     # Este endpoint SOLO registra la intención de pago para efectivo/bizum (que
     # quedan "pendientes" hasta que el fontanero confirme haberlos recibido, ver
     # /confirmar_efectivo y /confirmar_bizum). El pago con tarjeta NUNCA debe pasar
-    # por aquí: se marca "pagado" únicamente en /stripe/confirmar y /stripe/verificar,
-    # que comprueban de verdad contra Stripe que el cargo se hizo. Restringir
+    # por aquí: se marca "pagado" únicamente en /stripe/verificar, que comprueba
+    # de verdad contra Stripe que el cargo se hizo. Restringir
     # `metodo` con Literal evita que cualquier otro valor salte directo a "pagado"
     # sin haber pagado nada.
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
@@ -3402,81 +3402,6 @@ def descargar_factura(
 # ─── STRIPE ───────────────────────────────────────────────────────────────────
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
-
-@app.post("/servicios/{servicio_id}/stripe/crear-intent")
-def crear_stripe_intent(
-    servicio_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(auth.get_current_user),
-):
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(status_code=501, detail="Stripe no configurado. Añade STRIPE_SECRET_KEY en variables de entorno.")
-    try:
-        import stripe
-        stripe.api_key = STRIPE_SECRET_KEY
-    except ImportError:
-        raise HTTPException(status_code=501, detail="Librería stripe no instalada.")
-
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio or not servicio.precio:
-        raise HTTPException(status_code=400, detail="Servicio no encontrado o sin precio")
-    if servicio.cliente_id != current_user["id"]:
-        raise HTTPException(status_code=403, detail="Solo el cliente puede pagar este servicio")
-    intent = stripe.PaymentIntent.create(
-        amount=int(servicio.precio * 100),
-        currency="eur",
-        metadata={"servicio_id": servicio_id},
-    )
-    servicio.stripe_payment_intent = intent.id
-    db.commit()
-    return {"client_secret": intent.client_secret, "amount": servicio.precio}
-
-@app.post("/servicios/{servicio_id}/stripe/confirmar")
-def confirmar_stripe(
-    servicio_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(auth.get_current_user),
-):
-    """Igual que /stripe/verificar: nunca confiamos en que el cliente 'diga' que
-    pagó, se verifica directo contra Stripe antes de marcar el servicio como pagado."""
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(status_code=501, detail="Stripe no configurado. Añade STRIPE_SECRET_KEY en variables de entorno.")
-    try:
-        import stripe
-        stripe.api_key = STRIPE_SECRET_KEY
-    except ImportError:
-        raise HTTPException(status_code=501, detail="Librería stripe no instalada.")
-
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio:
-        raise HTTPException(status_code=404, detail="Servicio no encontrado")
-    es_cliente = servicio.cliente_id == current_user["id"]
-    fontanero_actual = db.query(models.Fontanero).filter(
-        models.Fontanero.usuario_id == current_user["id"]
-    ).first()
-    es_fontanero = bool(fontanero_actual) and servicio.fontanero_id == fontanero_actual.id
-    if not es_cliente and not es_fontanero:
-        raise HTTPException(status_code=403, detail="No puedes confirmar el pago de un servicio que no es tuyo")
-    if not servicio.stripe_payment_intent:
-        raise HTTPException(status_code=400, detail="No hay sesión de pago de Stripe para este servicio")
-
-    session = stripe.checkout.Session.retrieve(servicio.stripe_payment_intent)
-    if session.payment_status != "paid":
-        raise HTTPException(status_code=400, detail="El pago todavía no se ha completado en Stripe")
-
-    ya_pagado = servicio.estado == "pagado"
-    servicio.estado = "pagado"
-    servicio.metodo_pago = "stripe"
-    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
-    if not ya_pagado:
-        comision = round((servicio.precio or 0) * _tasa_comision(fontanero_obj), 2)
-        servicio.comision_aplicada = comision
-        servicio.comision_liquidada = True  # Stripe ya retuvo/repartió la comisión al cobrar
-        _consumir_trabajo_gratis(fontanero_obj)
-        if fontanero_obj and fontanero_obj.usuario_id:
-            _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido por Stripe", f"Pago de {servicio.precio}€ confirmado", "pago_recibido", servicio_id)
-    db.commit()
-    return {"mensaje": "Pago confirmado", "precio": servicio.precio, "comision": servicio.comision_aplicada}
 
 @app.post("/servicios/{servicio_id}/stripe/crear-checkout")
 def crear_stripe_checkout(
