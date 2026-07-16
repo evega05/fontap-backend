@@ -243,9 +243,31 @@ def _tasa_comision(fontanero) -> float:
         return COMISION_REDUCIDA_REFERIDO
     return COMISION_ESTANDAR
 
-def _consumir_trabajo_gratis(fontanero):
-    if fontanero and (fontanero.primeros_trabajos_gratis or 0) > 0:
-        fontanero.primeros_trabajos_gratis -= 1
+def _aplicar_comision_atomica(db: Session, fontanero) -> float:
+    """Calcula la comisión y consume el trabajo gratis (si aplica) en un único
+    UPDATE...WHERE atómico: leer primeros_trabajos_gratis y decrementarlo por
+    separado permitía que dos confirmaciones de pago concurrentes del mismo
+    fontanero (en dos servicios distintos) leyeran el mismo contador antes de
+    que ninguna escribiera, y las dos se llevaran 0% de comisión consumiendo
+    en la práctica una sola unidad del cupo de bienvenida (lost update, mismo
+    patrón que ya se corrigió en aceptar_servicio/aceptar_oferta)."""
+    if fontanero:
+        filas = db.query(models.Fontanero).filter(
+            models.Fontanero.id == fontanero.id,
+            models.Fontanero.primeros_trabajos_gratis > 0,
+        ).update(
+            {"primeros_trabajos_gratis": models.Fontanero.primeros_trabajos_gratis - 1},
+            synchronize_session=False,
+        )
+        if filas > 0:
+            return 0.0
+        # synchronize_session=False no refresca el atributo en memoria: sin este
+        # refresh, _tasa_comision volvería a leer el primeros_trabajos_gratis
+        # que este objeto tenía ANTES del intento de UPDATE (que puede seguir
+        # marcando >0 aunque el UPDATE ya haya determinado, contra el valor real
+        # en la base de datos, que no quedaba ninguno) y devolvería 0% igualmente.
+        db.refresh(fontanero)
+    return _tasa_comision(fontanero)
 
 def _crear_notificacion(db: Session, usuario_id: int, titulo: str, cuerpo: str, tipo: str = None, referencia_id: int = None):
     notif = models.Notificacion(
@@ -1780,13 +1802,22 @@ def _confirmar_pago_directo(db: Session, servicio_id: int, current_user: dict, e
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
     if not fontanero or servicio.fontanero_id != fontanero.id:
         raise HTTPException(status_code=403, detail="Este servicio no es tuyo")
-    if servicio.estado != "pago_pendiente":
+    # UPDATE...WHERE atómico (mismo patrón que aceptar_servicio/aceptar_oferta):
+    # si /confirmar_efectivo o /confirmar_bizum del mismo servicio llegan dos
+    # veces a la vez (doble tap, reintento de red), solo una debe poder marcarlo
+    # pagado y consumir la comisión/trabajo gratis; la otra debe ver que ya no
+    # hay pago pendiente.
+    filas = db.query(models.Servicio).filter(
+        models.Servicio.id == servicio_id,
+        models.Servicio.estado == "pago_pendiente",
+    ).update({"estado": "pagado"}, synchronize_session=False)
+    if filas == 0:
+        db.rollback()
         raise HTTPException(status_code=400, detail=f"No hay un pago pendiente de confirmar para este servicio (estado: {servicio.estado})")
-    _registrar_auditoria(db, servicio.id, "estado", servicio.estado, "pagado", current_user)
-    servicio.estado = "pagado"
-    servicio.comision_aplicada = round((servicio.precio or 0) * _tasa_comision(fontanero), 2)
+    db.refresh(servicio)
+    _registrar_auditoria(db, servicio.id, "estado", "pago_pendiente", "pagado", current_user)
+    servicio.comision_aplicada = round((servicio.precio or 0) * _aplicar_comision_atomica(db, fontanero), 2)
     servicio.comision_liquidada = False
-    _consumir_trabajo_gratis(fontanero)
     _crear_notificacion(db, servicio.cliente_id, "Pago confirmado", f"El profesional confirmó haber recibido tu pago en {etiqueta}", "pago_confirmado", servicio_id)
     db.commit()
     return {"mensaje": f"{etiqueta} confirmado"}
@@ -3717,19 +3748,24 @@ def verificar_stripe_checkout(
         raise HTTPException(status_code=403, detail="No puedes verificar el pago de un servicio que no es tuyo")
 
     session = stripe.checkout.Session.retrieve(servicio.stripe_payment_intent)
-    ya_pagado = servicio.estado == "pagado"
-    if session.payment_status == "paid" and not ya_pagado:
-        servicio.estado = "pagado"
-        servicio.metodo_pago = "stripe"
-        fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
-        comision = round((servicio.precio or 0) * _tasa_comision(fontanero_obj), 2)
-        servicio.comision_aplicada = comision
+    if session.payment_status != "paid":
+        return {"pagado": False}
+    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
+    # UPDATE...WHERE atómico: evita que dos llamadas concurrentes a /stripe/verificar
+    # del mismo servicio (reintento de red, doble navegación de vuelta del navegador)
+    # apliquen la comisión y consuman el trabajo gratis dos veces.
+    filas = db.query(models.Servicio).filter(
+        models.Servicio.id == servicio_id,
+        models.Servicio.estado != "pagado",
+    ).update({"estado": "pagado", "metodo_pago": "stripe"}, synchronize_session=False)
+    if filas > 0:
+        db.refresh(servicio)
+        servicio.comision_aplicada = round((servicio.precio or 0) * _aplicar_comision_atomica(db, fontanero_obj), 2)
         servicio.comision_liquidada = True  # Stripe ya retuvo/repartió la comisión al cobrar
-        _consumir_trabajo_gratis(fontanero_obj)
         if fontanero_obj and fontanero_obj.usuario_id:
             _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido", f"Pago de {servicio.precio}€ confirmado por Stripe", "pago_recibido", servicio_id)
         db.commit()
-    return {"pagado": session.payment_status == "paid"}
+    return {"pagado": True}
 
 @app.get("/pago-resultado")
 def pago_resultado(estado: str = "ok"):
