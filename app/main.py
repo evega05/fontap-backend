@@ -1822,6 +1822,7 @@ def ver_bloqueos(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = _resolver_fontanero(db, fontanero_id)
     return db.query(models.BloqueoHorario).filter(
         models.BloqueoHorario.fontanero_id == fontanero.id
@@ -1896,6 +1897,10 @@ def eliminar_servicio(
 # ─── IMÁGENES DE SERVICIO ──────────────────────────────────────────────────────
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+# Documentos de verificación de identidad (DNI, licencias...): fotos o PDF. Sin este
+# filtro se podía subir cualquier extensión (p. ej. .html/.svg) que luego se sirve
+# públicamente desde /uploads, con riesgo de contenido activo servido en el mismo origen.
+ALLOWED_DOCUMENT_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf"}
 
 def _marcar_fecha_hora(ruta: str):
     """Estampa fecha/hora (y la marca) en la foto, como prueba de que el trabajo
@@ -1927,9 +1932,7 @@ def subir_imagen_servicio(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio:
-        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    servicio = _verificar_participante_servicio(db, servicio_id, current_user)
     if archivo.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
     ext = archivo.filename.rsplit(".", 1)[-1] if "." in archivo.filename else "jpg"
@@ -1950,6 +1953,7 @@ def listar_imagenes_servicio(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_participante_servicio(db, servicio_id, current_user)
     return db.query(models.ImagenServicio).filter(
         models.ImagenServicio.servicio_id == servicio_id
     ).all()
@@ -1962,6 +1966,7 @@ def marcar_mensajes_leidos(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_participante_servicio(db, servicio_id, current_user)
     db.query(models.Mensaje).filter(
         models.Mensaje.servicio_id == servicio_id,
         models.Mensaje.emisor_id != current_user["id"],
@@ -2091,6 +2096,8 @@ def marcar_todas_leidas(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if current_user["id"] != usuario_id:
+        raise HTTPException(status_code=403, detail="No puedes modificar las notificaciones de otro usuario")
     db.query(models.Notificacion).filter(
         models.Notificacion.usuario_id == usuario_id,
         models.Notificacion.leida == False,
@@ -2344,6 +2351,7 @@ def ver_comparativa_precio(
 ):
     """Precio medio propio (servicios pagados) frente a la media del mismo
     gremio y zona, para que el profesional sepa si está caro o barato."""
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -2613,6 +2621,8 @@ def agregar_favorito(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if current_user["id"] != cliente_id:
+        raise HTTPException(status_code=403, detail="No puedes modificar los favoritos de otro cliente")
     existe = db.query(models.Favorito).filter(
         models.Favorito.cliente_id == cliente_id,
         models.Favorito.fontanero_id == fontanero_id,
@@ -2630,6 +2640,8 @@ def eliminar_favorito(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if current_user["id"] != cliente_id:
+        raise HTTPException(status_code=403, detail="No puedes modificar los favoritos de otro cliente")
     fav = db.query(models.Favorito).filter(
         models.Favorito.cliente_id == cliente_id,
         models.Favorito.fontanero_id == fontanero_id,
@@ -2701,6 +2713,8 @@ def listar_favoritos(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if current_user["id"] != cliente_id:
+        raise HTTPException(status_code=403, detail="No puedes ver los favoritos de otro cliente")
     favs = db.query(models.Favorito).filter(models.Favorito.cliente_id == cliente_id).all()
     ids = [f.fontanero_id for f in favs]
     return db.query(models.Fontanero).filter(models.Fontanero.id.in_(ids)).all()
@@ -2799,6 +2813,7 @@ def listar_mis_ofertas(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = _resolver_fontanero(db, fontanero_id)
     ofertas = db.query(models.Oferta).filter(
         models.Oferta.fontanero_id == fontanero.id
@@ -2979,6 +2994,7 @@ def ver_ruta_hoy(
     """Citas de hoy ordenadas por cercanía geográfica, empezando desde la posición
     actual del profesional (algoritmo del vecino más cercano). Junta tanto las citas
     del calendario interno como los servicios con fecha programada para hoy."""
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -3315,9 +3331,7 @@ def descargar_factura(
     except ImportError:
         raise HTTPException(status_code=501, detail="Generación de PDF no disponible. Instala reportlab.")
 
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio:
-        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    servicio = _verificar_participante_servicio(db, servicio_id, current_user)
     if servicio.estado not in ["pagado", "pago_pendiente"]:
         raise HTTPException(status_code=400, detail="Solo se puede generar factura de servicios pagados")
 
@@ -3367,6 +3381,8 @@ def crear_stripe_intent(
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio or not servicio.precio:
         raise HTTPException(status_code=400, detail="Servicio no encontrado o sin precio")
+    if servicio.cliente_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Solo el cliente puede pagar este servicio")
     intent = stripe.PaymentIntent.create(
         amount=int(servicio.precio * 100),
         currency="eur",
@@ -3508,6 +3524,13 @@ def verificar_stripe_checkout(
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio or not servicio.stripe_payment_intent:
         raise HTTPException(status_code=400, detail="No hay sesión de pago para este servicio")
+    es_cliente = servicio.cliente_id == current_user["id"]
+    fontanero_actual = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == current_user["id"]
+    ).first()
+    es_fontanero = bool(fontanero_actual) and servicio.fontanero_id == fontanero_actual.id
+    if not es_cliente and not es_fontanero:
+        raise HTTPException(status_code=403, detail="No puedes verificar el pago de un servicio que no es tuyo")
 
     session = stripe.checkout.Session.retrieve(servicio.stripe_payment_intent)
     ya_pagado = servicio.estado == "pagado"
@@ -3688,8 +3711,8 @@ def instrucciones_bizum(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio or not servicio.precio:
+    servicio = _verificar_participante_servicio(db, servicio_id, current_user)
+    if not servicio.precio:
         raise HTTPException(status_code=400, detail="Servicio no encontrado o sin precio")
     fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
     usuario_fontanero = db.query(models.Usuario).filter(models.Usuario.id == fontanero_obj.usuario_id).first() if fontanero_obj else None
@@ -3763,6 +3786,8 @@ def subir_documento(
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    if archivo.content_type not in ALLOWED_DOCUMENT_TYPES:
+        raise HTTPException(status_code=400, detail="Tipo de archivo no permitido. Sube una foto (JPEG/PNG/WEBP) o un PDF")
     ext = archivo.filename.rsplit(".", 1)[-1] if "." in archivo.filename else "pdf"
     nombre_archivo = f"doc_{uuid.uuid4().hex}.{ext}"
     ruta = os.path.join(UPLOAD_DIR, nombre_archivo)
