@@ -650,14 +650,10 @@ def registrar_usuario(usuario: schemas.UsuarioRegistro, db: Session = Depends(ge
                 models.Fontanero.gremio == usuario.gremio,
             ).first()
             if invitador:
+                # El beneficio para el invitador (comisión reducida 90 días) se concede
+                # recién cuando el referido verifica su email (ver /auth/verificar-email),
+                # no aquí: si no, cualquiera podría inflarlo creando cuentas sin verificar.
                 nuevo_fontanero.referido_por_id = invitador.id
-                invitador.referido_hasta = datetime.datetime.utcnow() + datetime.timedelta(days=90)
-                if invitador.usuario_id:
-                    _crear_notificacion(
-                        db, invitador.usuario_id, "¡Gracias por invitar a un colega!",
-                        f"{nuevo.nombre} se ha unido con tu código. Tendrás comisión reducida durante 90 días.",
-                        "referido", nuevo_fontanero.id,
-                    )
         db.commit()
         _avisar_admin_nuevo_profesional(nuevo.nombre, nuevo.email, usuario.gremio)
 
@@ -862,6 +858,18 @@ def verificar_email(datos: VerificarEmailDatos, db: Session = Depends(get_db)):
         raise error_generico
     usuario.email_verificado = True
     verificacion.usado = True
+    if usuario.tipo == "fontanero":
+        fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == usuario.id).first()
+        if fontanero and fontanero.referido_por_id:
+            invitador = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero.referido_por_id).first()
+            if invitador:
+                invitador.referido_hasta = datetime.datetime.utcnow() + datetime.timedelta(days=90)
+                if invitador.usuario_id:
+                    _crear_notificacion(
+                        db, invitador.usuario_id, "¡Gracias por invitar a un colega!",
+                        f"{usuario.nombre} se ha unido con tu código. Tendrás comisión reducida durante 90 días.",
+                        "referido", fontanero.id,
+                    )
     _limpiar_intentos("verify", email_normalizado)
     db.commit()
     return {"mensaje": "Email verificado"}
@@ -1157,6 +1165,7 @@ def listar_fontaneros(gremio: Optional[str] = None, ciudad: Optional[str] = None
         item = schemas.FontaneroRespuesta.model_validate(f)
         item.precio_desde = precios_min.get(f.id)
         item.servicios = servicios_por_fontanero.get(f.id, [])
+        item.codigo_referido = None  # solo le sirve al propio dueño (ver /fontaneros/{id}/perfil)
         resultado.append(item)
     return resultado
 
@@ -2235,13 +2244,22 @@ def subir_foto_perfil(
     return {"foto_url": fontanero.foto_url}
 
 @app.get("/fontaneros/{fontanero_id}/perfil", response_model=schemas.FontaneroRespuesta)
-def ver_perfil_fontanero(fontanero_id: int, db: Session = Depends(get_db)):
+def ver_perfil_fontanero(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[dict] = Depends(auth.get_current_user_opcional),
+):
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
-    return fontanero
+    item = schemas.FontaneroRespuesta.model_validate(fontanero)
+    # El código de referido solo le sirve al propio profesional (para compartirlo);
+    # a cualquier otra persona que consulte este perfil público no se le expone.
+    if not current_user or current_user.get("id") != fontanero_id:
+        item.codigo_referido = None
+    return item
 
 @app.get("/fontaneros/{fontanero_id}/checklist-perfil")
 def ver_checklist_perfil(fontanero_id: int, db: Session = Depends(get_db)):
@@ -2555,7 +2573,13 @@ def buscar_fontaneros(
         q = q.filter(models.Fontanero.disponible_24h == disponible_24h)
     if verificado is not None:
         q = q.filter(models.Fontanero.verificado == verificado)
-    return q.order_by(nullslast(models.Fontanero.valoracion.desc())).all()
+    fontaneros = q.order_by(nullslast(models.Fontanero.valoracion.desc())).all()
+    resultado = []
+    for f in fontaneros:
+        item = schemas.FontaneroRespuesta.model_validate(f)
+        item.codigo_referido = None  # solo le sirve al propio dueño (ver /fontaneros/{id}/perfil)
+        resultado.append(item)
+    return resultado
 
 # ─── SEGUIMIENTO EN VIVO ───────────────────────────────────────────────────────
 
@@ -2794,7 +2818,13 @@ def listar_favoritos(
         raise HTTPException(status_code=403, detail="No puedes ver los favoritos de otro cliente")
     favs = db.query(models.Favorito).filter(models.Favorito.cliente_id == cliente_id).all()
     ids = [f.fontanero_id for f in favs]
-    return db.query(models.Fontanero).filter(models.Fontanero.id.in_(ids)).all()
+    fontaneros = db.query(models.Fontanero).filter(models.Fontanero.id.in_(ids)).all()
+    resultado = []
+    for f in fontaneros:
+        item = schemas.FontaneroRespuesta.model_validate(f)
+        item.codigo_referido = None  # solo le sirve al propio dueño (ver /fontaneros/{id}/perfil)
+        resultado.append(item)
+    return resultado
 
 # ─── SISTEMA DE LICITACIÓN (OFERTAS) ──────────────────────────────────────────
 
@@ -3709,7 +3739,14 @@ def pagar_comision_pendiente(
             },
             "quantity": 1,
         }],
-        metadata={"fontanero_id": str(fontanero_id), "tipo": "comision_pendiente"},
+        metadata={
+            "fontanero_id": str(fontanero_id),
+            "tipo": "comision_pendiente",
+            # Fija qué servicios cubre este cobro exacto: si el fontanero liquida más
+            # trabajos en efectivo/Bizum mientras este checkout está pendiente de pago,
+            # /verificar no debe darlos por pagados también sin que medie dinero real.
+            "servicio_ids": ",".join(str(s.id) for s in pendientes),
+        },
         success_url=f"{base_url}/pago-resultado?estado=ok",
         cancel_url=f"{base_url}/pago-resultado?estado=cancelado",
     )
@@ -3733,10 +3770,17 @@ def verificar_comision_pendiente(
         raise HTTPException(status_code=400, detail="No hay un pago de comisión en curso")
     session = stripe.checkout.Session.retrieve(fontanero.comision_checkout_session)
     if session.payment_status == "paid":
-        db.query(models.Servicio).filter(
-            models.Servicio.fontanero_id == fontanero.id,
-            models.Servicio.comision_liquidada == False,
-        ).update({"comision_liquidada": True}, synchronize_session=False)
+        ids_pagados_raw = (session.metadata or {}).get("servicio_ids", "")
+        ids_pagados = [int(sid) for sid in ids_pagados_raw.split(",") if sid.strip().isdigit()]
+        # Solo liquida los servicios que formaban parte de este cobro concreto (guardados
+        # en el metadata al crear el checkout): así, si el fontanero acumuló más comisión
+        # pendiente después de crear este checkout, esa comisión nueva sigue pendiente.
+        if ids_pagados:
+            db.query(models.Servicio).filter(
+                models.Servicio.fontanero_id == fontanero.id,
+                models.Servicio.id.in_(ids_pagados),
+                models.Servicio.comision_liquidada == False,
+            ).update({"comision_liquidada": True}, synchronize_session=False)
         fontanero.comision_checkout_session = None
         db.commit()
     return {"liquidada": session.payment_status == "paid"}
