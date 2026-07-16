@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, Literal, List
 import datetime
 
@@ -256,9 +256,9 @@ class FavoritoRespuesta(BaseModel):
         from_attributes = True
 
 class OfertaCrear(BaseModel):
-    precio: Optional[float] = None
-    materiales: Optional[float] = None
-    mano_obra: Optional[float] = None
+    precio: Optional[float] = Field(default=None, ge=0)
+    materiales: Optional[float] = Field(default=None, ge=0)
+    mano_obra: Optional[float] = Field(default=None, ge=0)
     mensaje: Optional[str] = None
 
 class OfertaRespuesta(BaseModel):

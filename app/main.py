@@ -4,7 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, nullslast, inspect, text, func
 from typing import List, Literal, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from . import models, schemas, auth
 from .database import engine, get_db
 import os, uuid, requests as _http, secrets, smtplib, datetime, threading, time as _time
@@ -1618,10 +1618,18 @@ def aceptar_servicio(
     ).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
-    if servicio.fontanero_id is not None and servicio.fontanero_id != fontanero.id:
+    # UPDATE...WHERE atómico en vez de leer-y-luego-escribir: si dos fontaneros
+    # aceptan el mismo servicio abierto a la vez, solo uno de los dos UPDATE
+    # afecta una fila (el otro llega tarde y ve fontanero_id ya distinto al suyo).
+    filas = db.query(models.Servicio).filter(
+        models.Servicio.id == servicio_id,
+        or_(models.Servicio.fontanero_id == None, models.Servicio.fontanero_id == fontanero.id),
+    ).update({"fontanero_id": fontanero.id, "estado": "aceptado"}, synchronize_session=False)
+    if filas == 0:
+        db.rollback()
         raise HTTPException(status_code=400, detail="Este servicio ya fue asignado a otro profesional")
-    servicio.fontanero_id = fontanero.id
-    servicio.estado = "aceptado"
+    db.commit()
+    db.refresh(servicio)
     _crear_notificacion(db, servicio.cliente_id, "Servicio aceptado", f"Un fontanero ha aceptado tu solicitud de {servicio.tipo}", "servicio_aceptado", servicio.id)
     db.commit()
     _google_calendar_sync(db, servicio)
@@ -1647,7 +1655,7 @@ def rechazar_servicio(
     return {"mensaje": "Servicio rechazado"}
 
 class PrecioUpdate(BaseModel):
-    precio: float
+    precio: float = Field(gt=0)
 
 @app.put("/servicios/{servicio_id}/precio")
 def enviar_precio(
@@ -2399,6 +2407,34 @@ def eliminar_foto_galeria(
     db.commit()
     return {"mensaje": "Foto eliminada"}
 
+class GaleriaDescripcionUpdate(BaseModel):
+    descripcion: Optional[str] = None
+
+@app.put("/fontaneros/{fontanero_id}/galeria/{foto_id}", response_model=schemas.GaleriaRespuesta)
+def actualizar_descripcion_foto_galeria(
+    fontanero_id: int,
+    foto_id: int,
+    datos: GaleriaDescripcionUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _verificar_fontanero_propio(current_user, fontanero_id)
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    foto = db.query(models.GaleriaFontanero).filter(
+        models.GaleriaFontanero.id == foto_id,
+        models.GaleriaFontanero.fontanero_id == fontanero.id,
+    ).first()
+    if not foto:
+        raise HTTPException(status_code=404, detail="Foto no encontrada")
+    foto.descripcion = datos.descripcion
+    db.commit()
+    db.refresh(foto)
+    return foto
+
 # ─── ESTADÍSTICAS ──────────────────────────────────────────────────────────────
 
 @app.get("/fontaneros/{fontanero_id}/estadisticas", response_model=schemas.EstadisticasRespuesta)
@@ -2868,6 +2904,8 @@ def crear_oferta(
         precio_final = datos.precio
     else:
         raise HTTPException(status_code=422, detail="Falta el precio, o el desglose de materiales y mano de obra")
+    if precio_final <= 0:
+        raise HTTPException(status_code=422, detail="El precio debe ser mayor que cero")
 
     existente = db.query(models.Oferta).filter(
         models.Oferta.servicio_id == servicio_id,
@@ -3089,6 +3127,16 @@ def crear_cita(
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    if datos.servicio_id is not None:
+        # Sin esto, cualquier fontanero podía enlazar una cita a un servicio_id ajeno
+        # (adivinable, son IDs secuenciales) y ver_ruta_hoy le devolvía la ubicación
+        # GPS del cliente de ese servicio aunque no tuviera ninguna relación con él.
+        servicio_vinculado = db.query(models.Servicio).filter(
+            models.Servicio.id == datos.servicio_id,
+            models.Servicio.fontanero_id == fontanero.id,
+        ).first()
+        if not servicio_vinculado:
+            raise HTTPException(status_code=403, detail="Ese servicio no es tuyo")
     cita = models.Cita(
         fontanero_id=fontanero.id,
         servicio_id=datos.servicio_id,
@@ -3818,6 +3866,8 @@ def crear_inmueble(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
+    if current_user["tipo"] != "administrador_fincas":
+        raise HTTPException(status_code=403, detail="Solo un administrador de fincas puede registrar inmuebles")
     inmueble = models.Inmueble(
         administrador_id=current_user["id"],
         nombre=datos.nombre,
