@@ -781,10 +781,18 @@ def _avisar_admin_nuevo_profesional(nombre: str, email: str, gremio: str):
 class OlvidePasswordDatos(BaseModel):
     email: str
 
+MAX_ENVIOS_CODIGO = 3
+BLOQUEO_ENVIO_CODIGO_MINUTOS = 15
+
 @app.post("/auth/olvide-password")
 def olvide_password(datos: OlvidePasswordDatos, db: Session = Depends(get_db)):
-    usuario = db.query(models.Usuario).filter(models.Usuario.email == _norm_email(datos.email)).first()
+    email_normalizado = _norm_email(datos.email)
+    minutos = _intento_bloqueado("reset-envio", email_normalizado, MAX_ENVIOS_CODIGO, BLOQUEO_ENVIO_CODIGO_MINUTOS)
+    if minutos:
+        raise HTTPException(status_code=429, detail=f"Demasiadas solicitudes. Inténtalo de nuevo en {minutos} min")
+    usuario = db.query(models.Usuario).filter(models.Usuario.email == email_normalizado).first()
     if usuario:
+        _registrar_fallo("reset-envio", email_normalizado, MAX_ENVIOS_CODIGO, BLOQUEO_ENVIO_CODIGO_MINUTOS)
         token = secrets.token_hex(4).upper()
         reset = models.PasswordReset(
             usuario_id=usuario.id, token=token,
@@ -879,8 +887,13 @@ class ReenviarVerificacionDatos(BaseModel):
 
 @app.post("/auth/reenviar-verificacion")
 def reenviar_verificacion(datos: ReenviarVerificacionDatos, db: Session = Depends(get_db)):
-    usuario = db.query(models.Usuario).filter(models.Usuario.email == _norm_email(datos.email)).first()
+    email_normalizado = _norm_email(datos.email)
+    minutos = _intento_bloqueado("verify-envio", email_normalizado, MAX_ENVIOS_CODIGO, BLOQUEO_ENVIO_CODIGO_MINUTOS)
+    if minutos:
+        raise HTTPException(status_code=429, detail=f"Demasiadas solicitudes. Inténtalo de nuevo en {minutos} min")
+    usuario = db.query(models.Usuario).filter(models.Usuario.email == email_normalizado).first()
     if usuario and not usuario.email_verificado:
+        _registrar_fallo("verify-envio", email_normalizado, MAX_ENVIOS_CODIGO, BLOQUEO_ENVIO_CODIGO_MINUTOS)
         token = secrets.token_hex(4).upper()
         db.add(models.VerificacionEmail(
             usuario_id=usuario.id, token=token,
@@ -2294,8 +2307,13 @@ def ver_perfil_fontanero(
     return item
 
 @app.get("/fontaneros/{fontanero_id}/checklist-perfil")
-def ver_checklist_perfil(fontanero_id: int, db: Session = Depends(get_db)):
+def ver_checklist_perfil(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
     """Checklist de perfil completo, para animar a completar el perfil antes del primer lead."""
+    _verificar_fontanero_propio(current_user, fontanero_id)
     fontanero = db.query(models.Fontanero).filter(
         models.Fontanero.usuario_id == fontanero_id
     ).first()
@@ -2926,6 +2944,14 @@ def crear_oferta(
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
     if servicio.estado != "pendiente":
         raise HTTPException(status_code=400, detail="Este servicio ya no admite nuevas ofertas")
+    if servicio.fontanero_id not in (None, fontanero.id):
+        raise HTTPException(status_code=403, detail="Este servicio ya está dirigido a otro profesional")
+    bloqueado = db.query(models.ListaNegraCliente).filter(
+        models.ListaNegraCliente.cliente_id == servicio.cliente_id,
+        models.ListaNegraCliente.fontanero_id == fontanero.id,
+    ).first()
+    if bloqueado:
+        raise HTTPException(status_code=403, detail="Este cliente te ha bloqueado")
 
     if datos.materiales is not None and datos.mano_obra is not None:
         precio_final = datos.materiales + datos.mano_obra
