@@ -381,7 +381,8 @@ function renderProfesionales() {
       : `<button class="btn small primary" onclick="certificarPro(${f.id}, true)">Certificar Pro</button>`;
     const stripe = f.stripe_conectado ? '<span class="pill good">✓ Conectado</span>' : '<span class="pill neutro">— No</span>';
     const comision = f.comision_pendiente > 0
-      ? `<span class="pill warn">⏳ ${EUR.format(f.comision_pendiente)}</span>` : '<span class="pill neutro">0 €</span>';
+      ? `<span class="pill warn">⏳ ${EUR.format(f.comision_pendiente)}</span> <button class="btn small primary" onclick="marcarComisionPagada(${f.id}, '${h(f.nombre).replace(/'/g, "\\'")}')">Marcar pagada</button>`
+      : '<span class="pill neutro">0 €</span>';
     const estado = f.bloqueado ? '<span class="pill crit">⛔ Vetado</span>'
       : (f.disponible ? '<span class="pill good">✓ Disponible</span>' : '<span class="pill neutro">— Inactivo</span>');
     const botonVeto = f.usuario_id ? (f.bloqueado
@@ -406,6 +407,14 @@ async function certificarPro(fontaneroId, certificar) {
   if (!confirm(msg)) return;
   try {
     await api(`/admin/fontaneros/${fontaneroId}/certificar-pro?certificar=${certificar}`, { method: 'PUT' });
+    cargarProfesionales();
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function marcarComisionPagada(fontaneroId, nombre) {
+  if (!confirm(`¿Confirmas que ${nombre} ya pagó toda su comisión pendiente? Esto la marca como liquidada.`)) return;
+  try {
+    await api(`/admin/fontaneros/${fontaneroId}/comision-pendiente/marcar-pagada`, { method: 'POST' });
     cargarProfesionales();
   } catch (e) { alert('Error: ' + e.message); }
 }
