@@ -69,7 +69,6 @@ def _migrar_columnas_faltantes():
         "usuarios": {
             "terminos_aceptados": "BOOLEAN DEFAULT FALSE",
             "email_verificado": "BOOLEAN DEFAULT FALSE",
-            "telefono_verificado": "BOOLEAN DEFAULT FALSE",
             "bloqueado": "BOOLEAN DEFAULT FALSE",
         },
         "servicios": {

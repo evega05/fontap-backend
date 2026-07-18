@@ -319,10 +319,7 @@ async function cargarUsuarios() {
     if (!usuarios.length) { tbody.innerHTML = '<tr><td colspan="6" class="vacio">Sin resultados</td></tr>'; return; }
     tbody.innerHTML = usuarios.map(u => {
       const tipoTxt = u.tipo === 'fontanero' ? 'Profesional' : u.tipo === 'admin' ? 'Admin' : 'Cliente';
-      const verif = [
-        u.email_verificado ? '<span class="pill good">✓ email</span>' : '<span class="pill neutro">— email</span>',
-        u.telefono_verificado ? '<span class="pill good">✓ tel</span>' : '<span class="pill neutro">— tel</span>',
-      ].join(' ');
+      const verif = u.email_verificado ? '<span class="pill good">✓ email</span>' : '<span class="pill neutro">— email</span>';
       const estado = u.bloqueado ? '<span class="pill crit">⛔ Vetado</span>' : '<span class="pill good">✓ Activo</span>';
       const fecha = u.creado_en ? new Date(u.creado_en).toLocaleDateString('es-ES') : '—';
       const botonVeto = u.tipo === 'admin' ? '' : (u.bloqueado

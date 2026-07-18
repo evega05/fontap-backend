@@ -35,7 +35,6 @@ class UsuarioRespuesta(BaseModel):
     telefono: str
     tipo: str
     email_verificado: Optional[bool] = False
-    telefono_verificado: Optional[bool] = False
     bloqueado: Optional[bool] = False
     creado_en: Optional[datetime.datetime] = None
     class Config:
