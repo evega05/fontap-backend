@@ -231,6 +231,7 @@ def get_or_create_fontanero(db: Session, usuario_id: int, gremio: str = "fontane
 
 COMISION_ESTANDAR = 0.05
 COMISION_REDUCIDA_REFERIDO = 0.025
+LIMITE_SERVICIOS_COMISION_PENDIENTE = 10
 
 def _tasa_comision(fontanero) -> float:
     """0% mientras le queden trabajos gratis de bienvenida; 2.5% si está dentro
@@ -267,6 +268,13 @@ def _aplicar_comision_atomica(db: Session, fontanero) -> float:
         # en la base de datos, que no quedaba ninguno) y devolvería 0% igualmente.
         db.refresh(fontanero)
     return _tasa_comision(fontanero)
+
+def _num_servicios_comision_pendiente(db: Session, fontanero) -> int:
+    return db.query(models.Servicio).filter(
+        models.Servicio.fontanero_id == fontanero.id,
+        models.Servicio.comision_liquidada == False,
+        models.Servicio.comision_aplicada != None,
+    ).count()
 
 def _crear_notificacion(db: Session, usuario_id: int, titulo: str, cuerpo: str, tipo: str = None, referencia_id: int = None):
     notif = models.Notificacion(
@@ -1803,6 +1811,11 @@ def aceptar_servicio(
     ).first()
     if bloqueado:
         raise HTTPException(status_code=403, detail="Este cliente te ha bloqueado")
+    if _num_servicios_comision_pendiente(db, fontanero) >= LIMITE_SERVICIOS_COMISION_PENDIENTE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tienes {LIMITE_SERVICIOS_COMISION_PENDIENTE} o más trabajos con la comisión sin liquidar. Paga la comisión pendiente antes de aceptar más.",
+        )
     # UPDATE...WHERE atómico en vez de leer-y-luego-escribir: si dos fontaneros
     # aceptan el mismo servicio abierto a la vez, solo uno de los dos UPDATE
     # afecta una fila (el otro llega tarde y ve fontanero_id ya distinto al suyo).
@@ -3958,6 +3971,12 @@ def estado_stripe_fontanero(
     return {"conectado": True, "cobros_activos": bool(cuenta.charges_enabled)}
 
 # ─── COMISIÓN PENDIENTE (pagos en efectivo/Bizum que no pasan por Stripe) ─────
+# Bizum/transferencia de un profesional hacia la propia plataforma no se puede
+# verificar automáticamente (no hay integración real): el profesional ve el
+# importe y el destino, y un administrador la marca como pagada a mano tras
+# comprobarlo en el banco (ver /admin/fontaneros/{id}/comision-pendiente/marcar-pagada).
+COMISION_BIZUM_TELEFONO = os.getenv("COMISION_BIZUM_TELEFONO", "")
+COMISION_TRANSFERENCIA_IBAN = os.getenv("COMISION_TRANSFERENCIA_IBAN", "")
 
 @app.get("/fontaneros/{fontanero_id}/comision-pendiente")
 def comision_pendiente(
@@ -3976,7 +3995,69 @@ def comision_pendiente(
         models.Servicio.comision_aplicada != None,
     ).all()
     total = round(sum(s.comision_aplicada for s in pendientes), 2)
-    return {"total": total, "servicios": [s.id for s in pendientes]}
+    return {
+        "total": total,
+        "servicios": [s.id for s in pendientes],
+        "num_servicios": len(pendientes),
+        "limite_servicios": LIMITE_SERVICIOS_COMISION_PENDIENTE,
+    }
+
+def _instrucciones_comision(fontanero, total: float, telefono_o_iban: str, articulo_metodo: str, etiqueta_metodo: str) -> dict:
+    return {
+        "importe": total,
+        "concepto": fontanero.nombre,
+        "destino": telefono_o_iban,
+        "instrucciones": [
+            f"1. Abre tu app del banco y haz {articulo_metodo} {etiqueta_metodo} de {total}€.",
+            f"2. Destino: {telefono_o_iban or 'consulta con soporte, no está configurado'}.",
+            f"3. En el concepto, pon tu nombre completo: \"{fontanero.nombre}\".",
+            "4. En cuanto lo recibamos, un administrador marcará tu comisión como pagada.",
+        ],
+    }
+
+@app.get("/fontaneros/{fontanero_id}/comision-pendiente/bizum")
+def comision_pendiente_bizum(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    if fontanero_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="No puedes ver la comisión de otro fontanero")
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    total = round(sum(
+        s.comision_aplicada or 0 for s in db.query(models.Servicio).filter(
+            models.Servicio.fontanero_id == fontanero.id,
+            models.Servicio.comision_liquidada == False,
+            models.Servicio.comision_aplicada != None,
+        ).all()
+    ), 2)
+    if total <= 0:
+        raise HTTPException(status_code=400, detail="No tienes comisión pendiente")
+    return _instrucciones_comision(fontanero, total, COMISION_BIZUM_TELEFONO, "un", "Bizum")
+
+@app.get("/fontaneros/{fontanero_id}/comision-pendiente/transferencia")
+def comision_pendiente_transferencia(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    if fontanero_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="No puedes ver la comisión de otro fontanero")
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    total = round(sum(
+        s.comision_aplicada or 0 for s in db.query(models.Servicio).filter(
+            models.Servicio.fontanero_id == fontanero.id,
+            models.Servicio.comision_liquidada == False,
+            models.Servicio.comision_aplicada != None,
+        ).all()
+    ), 2)
+    if total <= 0:
+        raise HTTPException(status_code=400, detail="No tienes comisión pendiente")
+    return _instrucciones_comision(fontanero, total, COMISION_TRANSFERENCIA_IBAN, "una", "transferencia")
 
 @app.post("/fontaneros/{fontanero_id}/comision-pendiente/pagar")
 def pagar_comision_pendiente(
@@ -4328,6 +4409,27 @@ def admin_listar_fontaneros(
             "bloqueado": usuario.bloqueado if usuario else False,
         })
     return resultado
+
+@app.post("/admin/fontaneros/{fontanero_id}/comision-pendiente/marcar-pagada")
+def admin_marcar_comision_pagada(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Para cobros en efectivo/Bizum/transferencia que un admin ha comprobado a
+    mano (por ejemplo, tras ver que llegó la transferencia o el Bizum del
+    profesional): liquida toda su comisión pendiente de golpe."""
+    _verificar_admin(current_user)
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    filas = db.query(models.Servicio).filter(
+        models.Servicio.fontanero_id == fontanero.id,
+        models.Servicio.comision_liquidada == False,
+        models.Servicio.comision_aplicada != None,
+    ).update({"comision_liquidada": True}, synchronize_session=False)
+    db.commit()
+    return {"mensaje": f"Comisión marcada como pagada en {filas} servicio(s)"}
 
 @app.get("/admin/servicios")
 def admin_listar_servicios(
