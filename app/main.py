@@ -658,6 +658,40 @@ def pagina_privacidad():
     return Response(content=html, media_type="text/html")
 
 
+@app.get("/eliminar-cuenta", include_in_schema=False)
+def pagina_eliminar_cuenta():
+    from fastapi.responses import Response
+    secciones = [
+        {"titulo": "Cómo eliminar tu cuenta de Multiservicios Provenza", "texto":
+            "Puedes eliminar tu cuenta de Multiservicios Provenza (cliente o profesional) tú mismo, en cualquier "
+            "momento, directamente desde la app, siguiendo estos pasos: "
+            "1. Abre la app Multiservicios Provenza e inicia sesión. "
+            "2. Entra en tu perfil o Ajustes de cuenta. "
+            "3. Pulsa el botón \"Eliminar cuenta\". "
+            "4. Confirma la eliminación cuando se te pida. "
+            "La cuenta se elimina de inmediato al confirmar, sin esperas ni pasos adicionales."},
+        {"titulo": "Qué datos se eliminan", "texto":
+            "Al eliminar tu cuenta borramos o anonimizamos de inmediato: tu nombre, email, teléfono, foto de perfil, "
+            "descripción y ubicación. Tu sesión queda invalidada al instante en todos los dispositivos. Dejas de "
+            "aparecer como profesional disponible y ya no puedes iniciar sesión con esa cuenta."},
+        {"titulo": "Qué datos se conservan y por qué", "texto":
+            "Por obligación legal (normativa fiscal y de facturación en España), conservamos de forma anonimizada el "
+            "historial de servicios ya realizados y sus importes durante el plazo exigido por ley, sin datos que te "
+            "identifiquen personalmente. Los mensajes de chat y valoraciones asociados a servicios ya completados se "
+            "conservan igualmente anonimizados, ya que también forman parte del historial del servicio. Ningún dato "
+            "de contacto (email, teléfono) ni foto se conserva tras la eliminación."},
+        {"titulo": "Solicitar la eliminación sin acceso a la app", "texto":
+            "Si no puedes acceder a la app, puedes solicitar la eliminación de tu cuenta y datos escribiendo a "
+            "soporte@fontap.app desde el email registrado en tu cuenta, indicando tu nombre y email de la cuenta a eliminar."},
+    ]
+    html = _legal_page_html(
+        "Eliminar cuenta · Multiservicios Provenza",
+        "Cómo eliminar tu cuenta y qué ocurre con tus datos",
+        secciones,
+    )
+    return Response(content=html, media_type="text/html")
+
+
 def _estado_dependencias(db: Session):
     dependencias = []
 
