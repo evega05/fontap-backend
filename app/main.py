@@ -276,6 +276,16 @@ def _num_servicios_comision_pendiente(db: Session, fontanero) -> int:
         models.Servicio.comision_aplicada != None,
     ).count()
 
+def _verificar_email_profesional(db: Session, usuario_id: int):
+    """Impide que un profesional reciba/acepte trabajos hasta que confirme su email,
+    para que no se pueda operar como profesional con un email inventado."""
+    usuario = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
+    if usuario and not usuario.email_verificado:
+        raise HTTPException(
+            status_code=403,
+            detail="Debes verificar tu email antes de recibir o aceptar trabajos. Revisa tu bandeja de entrada o reenvía el código desde Ajustes.",
+        )
+
 def _crear_notificacion(db: Session, usuario_id: int, titulo: str, cuerpo: str, tipo: str = None, referencia_id: int = None):
     notif = models.Notificacion(
         usuario_id=usuario_id,
@@ -1337,12 +1347,15 @@ def listar_fontaneros(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    # Excluye profesionales cuyo usuario esté vetado por el admin
+    # Excluye profesionales cuyo usuario esté vetado por el admin, o que aún no
+    # hayan verificado su email (para que no aparezcan como contratables con un
+    # email inventado que nunca llegarán a confirmar).
     query = db.query(models.Fontanero).outerjoin(
         models.Usuario, models.Fontanero.usuario_id == models.Usuario.id
     ).filter(
         models.Fontanero.disponible == True,
         or_(models.Usuario.bloqueado == False, models.Usuario.bloqueado == None, models.Fontanero.usuario_id == None),
+        or_(models.Usuario.email_verificado == True, models.Fontanero.usuario_id == None),
     )
     if gremio:
         query = query.filter(models.Fontanero.gremio == gremio)
@@ -1526,10 +1539,13 @@ def _notificar_urgencia(db: Session, nuevo, tipo: str, solo_ciudad: bool):
     bloqueados = db.query(models.ListaNegraCliente.fontanero_id).filter(
         models.ListaNegraCliente.cliente_id == nuevo.cliente_id
     )
-    query = db.query(models.Fontanero).filter(
+    query = db.query(models.Fontanero).join(
+        models.Usuario, models.Fontanero.usuario_id == models.Usuario.id
+    ).filter(
         models.Fontanero.disponible == True,
         models.Fontanero.usuario_id != None,
         models.Fontanero.gremio == nuevo.gremio,
+        models.Usuario.email_verificado == True,
         ~models.Fontanero.id.in_(bloqueados),
     )
     if solo_ciudad and nuevo.ciudad:
@@ -1839,6 +1855,7 @@ def aceptar_servicio(
     ).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    _verificar_email_profesional(db, fontanero_usuario_id)
     bloqueado = db.query(models.ListaNegraCliente).filter(
         models.ListaNegraCliente.cliente_id == servicio.cliente_id,
         models.ListaNegraCliente.fontanero_id == fontanero.id,
@@ -2538,11 +2555,13 @@ def ver_checklist_perfil(
         {"clave": "verificacion", "etiqueta": "Documento de verificación subido", "hecho": db.query(models.DocumentoVerificacion).filter(models.DocumentoVerificacion.fontanero_id == fontanero.id).count() > 0},
     ]
     completados = sum(1 for i in items if i["hecho"])
+    usuario = db.query(models.Usuario).filter(models.Usuario.id == fontanero_id).first()
     return {
         "items": items,
         "completados": completados,
         "total": len(items),
         "porcentaje": round(completados / len(items) * 100),
+        "email_verificado": bool(usuario and usuario.email_verificado),
     }
 
 # ─── VACACIONES ────────────────────────────────────────────────────────────────
@@ -3146,6 +3165,7 @@ def crear_oferta(
     ).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    _verificar_email_profesional(db, current_user["id"])
     if servicio.estado != "pendiente":
         raise HTTPException(status_code=400, detail="Este servicio ya no admite nuevas ofertas")
     if servicio.fontanero_id not in (None, fontanero.id):
