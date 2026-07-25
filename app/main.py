@@ -34,10 +34,12 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 # Muchos hosts (Railway incluido) bloquean las conexiones salientes por el
 # protocolo SMTP para evitar spam, aunque el HTTPS normal funcione sin problema
 # (confirmado: SMTP da "Network is unreachable", un curl a HTTPS responde 200).
-# Por eso el envío real va por la API HTTP de Resend; SMTP se deja como reserva
-# únicamente para entornos (locales, otros hostings) donde sí esté disponible.
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-RESEND_FROM = os.getenv("RESEND_FROM", "Multiservicios Provenza <onboarding@resend.dev>")
+# Por eso el envío real va por la API HTTP de Brevo (no requiere dominio propio,
+# solo verificar una dirección de remitente); SMTP se deja como reserva única-
+# mente para entornos (locales, otros hostings) donde sí esté disponible.
+BREVO_API_KEY = os.getenv("BREVO_API_KEY", "")
+BREVO_FROM_EMAIL = os.getenv("BREVO_FROM_EMAIL", "")
+BREVO_FROM_NOMBRE = os.getenv("BREVO_FROM_NOMBRE", "Multiservicios Provenza")
 
 SMTP_HOST = os.getenv("SMTP_HOST", "")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
@@ -719,11 +721,11 @@ def _estado_dependencias(db: Session):
     except Exception:
         dependencias.append(("Base de datos", False, "No responde"))
 
-    correo_configurado = bool(RESEND_API_KEY or SMTP_HOST)
+    correo_configurado = bool((BREVO_API_KEY and BREVO_FROM_EMAIL) or SMTP_HOST)
     dependencias.append((
         "Correo (verificación, recuperación de contraseña)",
         correo_configurado,
-        "Configurado (Resend)" if RESEND_API_KEY else ("Configurado (SMTP)" if SMTP_HOST else "Sin configurar (los códigos se muestran solo en los logs)"),
+        "Configurado (Brevo)" if (BREVO_API_KEY and BREVO_FROM_EMAIL) else ("Configurado (SMTP)" if SMTP_HOST else "Sin configurar (los códigos se muestran solo en los logs)"),
     ))
 
     dependencias.append((
@@ -937,26 +939,26 @@ def login(datos: schemas.UsuarioLogin, db: Session = Depends(get_db)):
     }
 
 def _enviar_email(destinatario: str, asunto: str, cuerpo: str, etiqueta: str, codigo: str = None):
-    if RESEND_API_KEY:
+    if BREVO_API_KEY and BREVO_FROM_EMAIL:
         try:
             r = _http.post(
-                "https://api.resend.com/emails",
-                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+                "https://api.brevo.com/v3/smtp/email",
+                headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json", "Accept": "application/json"},
                 json={
-                    "from": RESEND_FROM,
-                    "to": [destinatario],
+                    "sender": {"name": BREVO_FROM_NOMBRE, "email": BREVO_FROM_EMAIL},
+                    "to": [{"email": destinatario}],
                     "subject": asunto,
-                    "text": cuerpo,
+                    "textContent": cuerpo,
                 },
                 timeout=10,
             )
             if r.status_code >= 400:
-                print(f"[{etiqueta}] Error de Resend enviando a {destinatario}: {r.status_code} {r.text}")
+                print(f"[{etiqueta}] Error de Brevo enviando a {destinatario}: {r.status_code} {r.text}")
         except Exception as e:
-            print(f"[{etiqueta}] Error enviando email (Resend) a {destinatario}: {e}")
+            print(f"[{etiqueta}] Error enviando email (Brevo) a {destinatario}: {e}")
         return
     if not SMTP_HOST:
-        print(f"[{etiqueta}] Correo no configurado (ni Resend ni SMTP). Código para {destinatario}: {codigo or '(ver cuerpo)'}")
+        print(f"[{etiqueta}] Correo no configurado (ni Brevo ni SMTP). Código para {destinatario}: {codigo or '(ver cuerpo)'}")
         return
     try:
         msg = MIMEText(cuerpo)
