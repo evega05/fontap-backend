@@ -31,6 +31,14 @@ def _norm_email(email: str) -> str:
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# Muchos hosts (Railway incluido) bloquean las conexiones salientes por el
+# protocolo SMTP para evitar spam, aunque el HTTPS normal funcione sin problema
+# (confirmado: SMTP da "Network is unreachable", un curl a HTTPS responde 200).
+# Por eso el envío real va por la API HTTP de Resend; SMTP se deja como reserva
+# únicamente para entornos (locales, otros hostings) donde sí esté disponible.
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+RESEND_FROM = os.getenv("RESEND_FROM", "Multiservicios Provenza <onboarding@resend.dev>")
+
 SMTP_HOST = os.getenv("SMTP_HOST", "")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
@@ -711,10 +719,11 @@ def _estado_dependencias(db: Session):
     except Exception:
         dependencias.append(("Base de datos", False, "No responde"))
 
+    correo_configurado = bool(RESEND_API_KEY or SMTP_HOST)
     dependencias.append((
         "Correo (verificación, recuperación de contraseña)",
-        bool(SMTP_HOST),
-        "Configurado" if SMTP_HOST else "Sin configurar (los códigos se muestran solo en los logs)",
+        correo_configurado,
+        "Configurado (Resend)" if RESEND_API_KEY else ("Configurado (SMTP)" if SMTP_HOST else "Sin configurar (los códigos se muestran solo en los logs)"),
     ))
 
     dependencias.append((
@@ -928,8 +937,26 @@ def login(datos: schemas.UsuarioLogin, db: Session = Depends(get_db)):
     }
 
 def _enviar_email(destinatario: str, asunto: str, cuerpo: str, etiqueta: str, codigo: str = None):
+    if RESEND_API_KEY:
+        try:
+            r = _http.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+                json={
+                    "from": RESEND_FROM,
+                    "to": [destinatario],
+                    "subject": asunto,
+                    "text": cuerpo,
+                },
+                timeout=10,
+            )
+            if r.status_code >= 400:
+                print(f"[{etiqueta}] Error de Resend enviando a {destinatario}: {r.status_code} {r.text}")
+        except Exception as e:
+            print(f"[{etiqueta}] Error enviando email (Resend) a {destinatario}: {e}")
+        return
     if not SMTP_HOST:
-        print(f"[{etiqueta}] SMTP no configurado. Código para {destinatario}: {codigo or '(ver cuerpo)'}")
+        print(f"[{etiqueta}] Correo no configurado (ni Resend ni SMTP). Código para {destinatario}: {codigo or '(ver cuerpo)'}")
         return
     try:
         msg = MIMEText(cuerpo)
@@ -941,7 +968,7 @@ def _enviar_email(destinatario: str, asunto: str, cuerpo: str, etiqueta: str, co
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SMTP_FROM, [destinatario], msg.as_string())
     except Exception as e:
-        print(f"[{etiqueta}] Error enviando email a {destinatario}: {e}")
+        print(f"[{etiqueta}] Error enviando email (SMTP) a {destinatario}: {e}")
 
 def _enviar_email_reset(destinatario: str, token: str):
     cuerpo = (
