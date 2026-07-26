@@ -286,6 +286,25 @@ class ProyectoInteres(Base):
     mensaje = Column(Text, nullable=True)
     creado_en = Column(DateTime, default=utcnow)
 
+class OfertaEmpleo(Base):
+    __tablename__ = "ofertas_empleo"
+    id = Column(Integer, primary_key=True, index=True)
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    gremio = Column(String)
+    titulo = Column(String)
+    descripcion = Column(Text, nullable=True)
+    zona = Column(String, nullable=True)
+    activa = Column(Boolean, default=True)
+    creado_en = Column(DateTime, default=utcnow)
+
+class OfertaEmpleoPostulante(Base):
+    __tablename__ = "ofertas_empleo_postulantes"
+    id = Column(Integer, primary_key=True, index=True)
+    oferta_id = Column(Integer, ForeignKey("ofertas_empleo.id"))
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    mensaje = Column(Text, nullable=True)
+    creado_en = Column(DateTime, default=utcnow)
+
 class DocumentoVerificacion(Base):
     __tablename__ = "documentos_verificacion"
     id = Column(Integer, primary_key=True, index=True)

@@ -1905,6 +1905,171 @@ def listar_interesados_proyecto(
         resultado.append(data)
     return resultado
 
+# ─── BOLSA DE AYUDANTES/APRENDICES ─────────────────────────────────────────────
+# Un profesional que necesita ayuda puntual o un aprendiz publica una oferta;
+# otros profesionales del mismo gremio pueden postularse.
+
+def _oferta_empleo_con_datos(db: Session, oferta: models.OfertaEmpleo) -> schemas.OfertaEmpleoRespuesta:
+    data = schemas.OfertaEmpleoRespuesta.model_validate(oferta)
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == oferta.fontanero_id).first()
+    if fontanero:
+        data.fontanero_nombre = fontanero.nombre
+        data.fontanero_valoracion = fontanero.valoracion
+    data.num_postulantes = db.query(models.OfertaEmpleoPostulante).filter(
+        models.OfertaEmpleoPostulante.oferta_id == oferta.id
+    ).count()
+    return data
+
+@app.post("/ofertas-empleo", response_model=schemas.OfertaEmpleoRespuesta)
+def crear_oferta_empleo(
+    datos: schemas.OfertaEmpleoCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
+    if not fontanero:
+        raise HTTPException(status_code=403, detail="Solo un profesional puede publicar una oferta de ayudante")
+    oferta = models.OfertaEmpleo(
+        fontanero_id=fontanero.id,
+        gremio=fontanero.gremio,
+        titulo=datos.titulo,
+        descripcion=datos.descripcion,
+        zona=datos.zona or fontanero.zona,
+    )
+    db.add(oferta)
+    db.commit()
+    db.refresh(oferta)
+    return _oferta_empleo_con_datos(db, oferta)
+
+@app.get("/ofertas-empleo", response_model=List[schemas.OfertaEmpleoRespuesta])
+def listar_ofertas_empleo(
+    gremio: Optional[str] = None,
+    ciudad: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    query = db.query(models.OfertaEmpleo).filter(models.OfertaEmpleo.activa == True)
+    if gremio:
+        query = query.filter(models.OfertaEmpleo.gremio == gremio)
+    if ciudad:
+        query = query.filter(func.lower(models.OfertaEmpleo.zona) == ciudad.lower())
+    ofertas = query.order_by(models.OfertaEmpleo.id.desc()).all()
+    return [_oferta_empleo_con_datos(db, o) for o in ofertas]
+
+@app.get("/ofertas-empleo/mias", response_model=List[schemas.OfertaEmpleoRespuesta])
+def listar_mis_ofertas_empleo(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
+    if not fontanero:
+        return []
+    ofertas = db.query(models.OfertaEmpleo).filter(
+        models.OfertaEmpleo.fontanero_id == fontanero.id
+    ).order_by(models.OfertaEmpleo.id.desc()).all()
+    return [_oferta_empleo_con_datos(db, o) for o in ofertas]
+
+@app.put("/ofertas-empleo/{oferta_id}", response_model=schemas.OfertaEmpleoRespuesta)
+def actualizar_oferta_empleo(
+    oferta_id: int,
+    datos: schemas.OfertaEmpleoActualizar,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
+    oferta = db.query(models.OfertaEmpleo).filter(
+        models.OfertaEmpleo.id == oferta_id,
+        models.OfertaEmpleo.fontanero_id == fontanero.id if fontanero else False,
+    ).first()
+    if not oferta:
+        raise HTTPException(status_code=404, detail="Oferta no encontrada")
+    if datos.activa is not None:
+        oferta.activa = datos.activa
+    db.commit()
+    db.refresh(oferta)
+    return _oferta_empleo_con_datos(db, oferta)
+
+@app.delete("/ofertas-empleo/{oferta_id}")
+def eliminar_oferta_empleo(
+    oferta_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
+    oferta = db.query(models.OfertaEmpleo).filter(
+        models.OfertaEmpleo.id == oferta_id,
+        models.OfertaEmpleo.fontanero_id == fontanero.id if fontanero else False,
+    ).first()
+    if not oferta:
+        raise HTTPException(status_code=404, detail="Oferta no encontrada")
+    db.query(models.OfertaEmpleoPostulante).filter(models.OfertaEmpleoPostulante.oferta_id == oferta_id).delete()
+    db.delete(oferta)
+    db.commit()
+    return {"mensaje": "Oferta eliminada"}
+
+@app.post("/ofertas-empleo/{oferta_id}/postular", response_model=schemas.OfertaEmpleoPostulanteRespuesta)
+def postularse_oferta_empleo(
+    oferta_id: int,
+    datos: schemas.OfertaEmpleoPostularCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    oferta = db.query(models.OfertaEmpleo).filter(models.OfertaEmpleo.id == oferta_id).first()
+    if not oferta:
+        raise HTTPException(status_code=404, detail="Oferta no encontrada")
+    postulante = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
+    if not postulante:
+        raise HTTPException(status_code=403, detail="Solo un profesional puede postularse")
+    if postulante.id == oferta.fontanero_id:
+        raise HTTPException(status_code=400, detail="No puedes postularte a tu propia oferta")
+    existente = db.query(models.OfertaEmpleoPostulante).filter(
+        models.OfertaEmpleoPostulante.oferta_id == oferta_id,
+        models.OfertaEmpleoPostulante.fontanero_id == postulante.id,
+    ).first()
+    if existente:
+        return schemas.OfertaEmpleoPostulanteRespuesta.model_validate(existente, from_attributes=True)
+    postulacion = models.OfertaEmpleoPostulante(oferta_id=oferta_id, fontanero_id=postulante.id, mensaje=datos.mensaje)
+    db.add(postulacion)
+    if oferta.fontanero_id:
+        dueño = db.query(models.Fontanero).filter(models.Fontanero.id == oferta.fontanero_id).first()
+        if dueño and dueño.usuario_id:
+            _crear_notificacion(db, dueño.usuario_id, "Nuevo postulante a tu oferta",
+                                 f"{postulante.nombre} está interesado en \"{oferta.titulo}\"", "oferta_empleo_postulante", oferta_id)
+    db.commit()
+    db.refresh(postulacion)
+    resultado = schemas.OfertaEmpleoPostulanteRespuesta.model_validate(postulacion, from_attributes=True)
+    resultado.fontanero_nombre = postulante.nombre
+    resultado.fontanero_telefono = postulante.telefono
+    resultado.fontanero_valoracion = postulante.valoracion
+    return resultado
+
+@app.get("/ofertas-empleo/{oferta_id}/postulantes", response_model=List[schemas.OfertaEmpleoPostulanteRespuesta])
+def listar_postulantes_oferta_empleo(
+    oferta_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
+    oferta = db.query(models.OfertaEmpleo).filter(
+        models.OfertaEmpleo.id == oferta_id,
+        models.OfertaEmpleo.fontanero_id == fontanero.id if fontanero else False,
+    ).first()
+    if not oferta:
+        raise HTTPException(status_code=404, detail="Oferta no encontrada")
+    postulantes = db.query(models.OfertaEmpleoPostulante).filter(
+        models.OfertaEmpleoPostulante.oferta_id == oferta_id
+    ).order_by(models.OfertaEmpleoPostulante.id.desc()).all()
+    resultado = []
+    for p in postulantes:
+        data = schemas.OfertaEmpleoPostulanteRespuesta.model_validate(p, from_attributes=True)
+        postulante = db.query(models.Fontanero).filter(models.Fontanero.id == p.fontanero_id).first()
+        if postulante:
+            data.fontanero_nombre = postulante.nombre
+            data.fontanero_telefono = postulante.telefono
+            data.fontanero_valoracion = postulante.valoracion
+        resultado.append(data)
+    return resultado
+
 @app.get("/servicios/{servicio_id}")
 def ver_servicio(
     servicio_id: int,

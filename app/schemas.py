@@ -436,6 +436,44 @@ class InmuebleRespuesta(BaseModel):
     class Config:
         from_attributes = True
 
+class OfertaEmpleoCrear(BaseModel):
+    titulo: str
+    descripcion: Optional[str] = None
+    zona: Optional[str] = None
+
+class OfertaEmpleoActualizar(BaseModel):
+    activa: Optional[bool] = None
+
+class OfertaEmpleoRespuesta(BaseModel):
+    id: int
+    fontanero_id: int
+    gremio: str
+    titulo: str
+    descripcion: Optional[str] = None
+    zona: Optional[str] = None
+    activa: bool
+    creado_en: datetime.datetime
+    fontanero_nombre: Optional[str] = None
+    fontanero_valoracion: Optional[float] = None
+    num_postulantes: int = 0
+    class Config:
+        from_attributes = True
+
+class OfertaEmpleoPostularCrear(BaseModel):
+    mensaje: Optional[str] = None
+
+class OfertaEmpleoPostulanteRespuesta(BaseModel):
+    id: int
+    oferta_id: int
+    fontanero_id: int
+    mensaje: Optional[str] = None
+    creado_en: datetime.datetime
+    fontanero_nombre: Optional[str] = None
+    fontanero_telefono: Optional[str] = None
+    fontanero_valoracion: Optional[float] = None
+    class Config:
+        from_attributes = True
+
 class DocumentoCrear(BaseModel):
     tipo: str
 
