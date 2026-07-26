@@ -2171,6 +2171,45 @@ def cancelar_servicio(
     db.commit()
     return {"mensaje": "Servicio cancelado"}
 
+@app.put("/servicios/{servicio_id}/reprogramar", response_model=schemas.ServicioRespuesta)
+def reprogramar_servicio(
+    servicio_id: int,
+    datos: schemas.ServicioReprogramar,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Cambia la fecha/hora de una cita ya programada sin cancelarla: no toca el
+    estado ni cuenta como cancelación en las estadísticas de ninguna de las partes."""
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+
+    es_cliente = servicio.cliente_id == current_user["id"]
+    fontanero_actual = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == current_user["id"]
+    ).first()
+    es_fontanero = bool(fontanero_actual) and servicio.fontanero_id == fontanero_actual.id
+    if not es_cliente and not es_fontanero:
+        raise HTTPException(status_code=403, detail="No puedes reprogramar un servicio que no es tuyo")
+    if servicio.estado in ["pagado", "completado", "cancelado", "rechazado", "en_camino"]:
+        raise HTTPException(status_code=400, detail="Este servicio ya no se puede reprogramar")
+
+    _registrar_auditoria(db, servicio.id, "fecha", servicio.fecha, datos.fecha, current_user)
+    servicio.fecha = datos.fecha
+    db.commit()
+    _google_calendar_sync(db, servicio)
+
+    if es_cliente and servicio.fontanero_id:
+        fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
+        if fontanero_obj and fontanero_obj.usuario_id:
+            _crear_notificacion(db, fontanero_obj.usuario_id, "📅 Cita reprogramada",
+                                 "El cliente ha cambiado la fecha/hora del servicio", "reprogramado", servicio_id)
+    elif es_fontanero:
+        _crear_notificacion(db, servicio.cliente_id, "📅 Cita reprogramada",
+                             "El profesional ha cambiado la fecha/hora del servicio", "reprogramado", servicio_id)
+    db.commit()
+    return schemas.ServicioRespuesta.from_orm_with_color(servicio)
+
 @app.get("/clientes/{cliente_id}/servicios")
 def ver_servicios_cliente(
     cliente_id: int,

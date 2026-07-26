@@ -112,6 +112,9 @@ class EstadisticasRespuesta(BaseModel):
     valoracion_media: Optional[float] = None
     tasa_aceptacion: float
 
+class ServicioReprogramar(BaseModel):
+    fecha: datetime.datetime
+
 class ServicioCrear(BaseModel):
     tipo: str
     descripcion: Optional[str] = None
