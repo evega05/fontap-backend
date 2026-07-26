@@ -75,6 +75,8 @@ class Servicio(Base):
     comision_liquidada = Column(Boolean, default=True)
     stripe_payment_intent = Column(String, nullable=True)
     google_event_id = Column(String, nullable=True)
+    fontanero_preferente_id = Column(Integer, ForeignKey("fontaneros.id"), nullable=True)
+    prioridad_hasta = Column(DateTime, nullable=True)
     creado_en = Column(DateTime, default=utcnow)
 
 class ServicioFontanero(Base):
@@ -154,6 +156,7 @@ class Favorito(Base):
     id = Column(Integer, primary_key=True, index=True)
     cliente_id = Column(Integer, ForeignKey("usuarios.id"))
     fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    preferente = Column(Boolean, default=False)
     creado_en = Column(DateTime, default=utcnow)
 
 class Oferta(Base):

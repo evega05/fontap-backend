@@ -67,8 +67,12 @@ class FontaneroRespuesta(BaseModel):
     primeros_trabajos_gratis: int = 0
     google_calendar_conectado: bool = False
     miembro_desde: Optional[datetime.datetime] = None
+    favorito_preferente: bool = False
     class Config:
         from_attributes = True
+
+class FavoritoPreferenteActualizar(BaseModel):
+    preferente: bool
 
 class FontaneroActualizar(BaseModel):
     zona: Optional[str] = None

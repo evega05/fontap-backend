@@ -91,6 +91,11 @@ def _migrar_columnas_faltantes():
             "longitud_cliente": "FLOAT",
             "aviso_proximidad_enviado": "BOOLEAN DEFAULT FALSE",
             "es_consulta": "BOOLEAN DEFAULT FALSE",
+            "fontanero_preferente_id": "INTEGER",
+            "prioridad_hasta": "TIMESTAMP",
+        },
+        "favoritos": {
+            "preferente": "BOOLEAN DEFAULT FALSE",
         },
         "citas": {
             "recordatorio_24h": "BOOLEAN DEFAULT FALSE",
@@ -1620,7 +1625,34 @@ def _crear_servicio_interno(db: Session, cliente_id: int, tipo: str, descripcion
         # a tiempo, _bucle_ampliar_radio_urgencias avisará también al resto (ver más abajo).
         _notificar_urgencia(db, nuevo, tipo, solo_ciudad=bool(nuevo.ciudad))
         db.commit()
+    elif not es_consulta and nuevo.gremio:
+        _avisar_preferente(db, nuevo, tipo)
     return nuevo
+
+def _avisar_preferente(db: Session, nuevo, tipo: str) -> None:
+    """Si el cliente tiene marcado un "profesional de confianza" para el gremio de esta
+    solicitud, le avisa primero y le da unos minutos de ventaja antes de que la vea el
+    resto del mercado (ver filtro en /servicios/abiertos)."""
+    favorito_preferente = db.query(models.Favorito).join(
+        models.Fontanero, models.Favorito.fontanero_id == models.Fontanero.id
+    ).filter(
+        models.Favorito.cliente_id == nuevo.cliente_id,
+        models.Favorito.preferente == True,
+        models.Fontanero.gremio == nuevo.gremio,
+        models.Fontanero.disponible == True,
+    ).first()
+    if not favorito_preferente:
+        return
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == favorito_preferente.fontanero_id).first()
+    if not fontanero or not fontanero.usuario_id:
+        return
+    nuevo.fontanero_preferente_id = fontanero.id
+    nuevo.prioridad_hasta = datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
+    db.commit()
+    _crear_notificacion(db, fontanero.usuario_id, "⭐ Un cliente te tiene como profesional de confianza",
+                         f"Tienes prioridad para una nueva solicitud de {tipo} antes de que se abra al resto",
+                         "solicitud_preferente", nuevo.id)
+    db.commit()
 
 @app.post("/servicios", response_model=schemas.ServicioRespuesta)
 def crear_servicio(
@@ -1657,6 +1689,12 @@ def listar_servicios_abiertos(
         )
         query = query.filter(~models.Servicio.cliente_id.in_(bloqueado_por))
     servicios = query.order_by(models.Servicio.id.desc()).all()
+    ahora = datetime.datetime.utcnow()
+    servicios = [
+        s for s in servicios
+        if not (s.prioridad_hasta and s.prioridad_hasta > ahora
+                and (not fontanero_actual or s.fontanero_preferente_id != fontanero_actual.id))
+    ]
     resultado = []
     for s in servicios:
         data = schemas.ServicioRespuesta.from_orm_with_color(s)
@@ -3304,14 +3342,53 @@ def listar_favoritos(
     if current_user["id"] != cliente_id:
         raise HTTPException(status_code=403, detail="No puedes ver los favoritos de otro cliente")
     favs = db.query(models.Favorito).filter(models.Favorito.cliente_id == cliente_id).all()
-    ids = [f.fontanero_id for f in favs]
+    preferente_por_fontanero = {f.fontanero_id: f.preferente for f in favs}
+    ids = list(preferente_por_fontanero.keys())
     fontaneros = db.query(models.Fontanero).filter(models.Fontanero.id.in_(ids)).all()
     resultado = []
     for f in fontaneros:
         item = schemas.FontaneroRespuesta.model_validate(f)
         item.codigo_referido = None  # solo le sirve al propio dueño (ver /fontaneros/{id}/perfil)
+        item.favorito_preferente = bool(preferente_por_fontanero.get(f.id))
         resultado.append(item)
     return resultado
+
+@app.put("/clientes/{cliente_id}/favoritos/{fontanero_id}/preferente")
+def marcar_favorito_preferente(
+    cliente_id: int,
+    fontanero_id: int,
+    datos: schemas.FavoritoPreferenteActualizar,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Marca un favorito como "profesional de confianza" para su gremio: las próximas
+    solicitudes no urgentes de ese gremio (sin elegir profesional a mano) le avisan
+    primero a él, con una ventana de prioridad antes de abrirse al resto del mercado."""
+    if current_user["id"] != cliente_id:
+        raise HTTPException(status_code=403, detail="No puedes modificar los favoritos de otro cliente")
+    fav = db.query(models.Favorito).filter(
+        models.Favorito.cliente_id == cliente_id,
+        models.Favorito.fontanero_id == fontanero_id,
+    ).first()
+    if not fav:
+        raise HTTPException(status_code=404, detail="Ese profesional no está en tus favoritos")
+    if datos.preferente:
+        fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+        if not fontanero:
+            raise HTTPException(status_code=404, detail="Profesional no encontrado")
+        # Solo puede haber un preferente por gremio: se desmarca cualquier otro.
+        otros_favoritos = db.query(models.Favorito).filter(
+            models.Favorito.cliente_id == cliente_id,
+            models.Favorito.preferente == True,
+            models.Favorito.fontanero_id != fontanero_id,
+        ).all()
+        for otro in otros_favoritos:
+            otro_fontanero = db.query(models.Fontanero).filter(models.Fontanero.id == otro.fontanero_id).first()
+            if otro_fontanero and otro_fontanero.gremio == fontanero.gremio:
+                otro.preferente = False
+    fav.preferente = datos.preferente
+    db.commit()
+    return {"mensaje": "Profesional de confianza actualizado" if datos.preferente else "Ya no es tu profesional de confianza"}
 
 # ─── SISTEMA DE LICITACIÓN (OFERTAS) ──────────────────────────────────────────
 
