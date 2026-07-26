@@ -90,6 +90,7 @@ def _migrar_columnas_faltantes():
             "latitud_cliente": "FLOAT",
             "longitud_cliente": "FLOAT",
             "aviso_proximidad_enviado": "BOOLEAN DEFAULT FALSE",
+            "es_consulta": "BOOLEAN DEFAULT FALSE",
         },
         "citas": {
             "recordatorio_24h": "BOOLEAN DEFAULT FALSE",
@@ -1532,6 +1533,7 @@ def ver_solicitudes_fontanero(
     )
     pendientes = db.query(models.Servicio).filter(
         models.Servicio.estado == "pendiente",
+        models.Servicio.es_consulta == False,
         or_(
             models.Servicio.fontanero_id == None,
             models.Servicio.fontanero_id == fontanero.id,
@@ -1541,7 +1543,7 @@ def ver_solicitudes_fontanero(
 
     propias = db.query(models.Servicio).filter(
         models.Servicio.fontanero_id == fontanero.id,
-        models.Servicio.estado.in_(["aceptado", "precio_enviado", "pago_pendiente", "pagado", "completado"]),
+        models.Servicio.estado.in_(["aceptado", "precio_enviado", "precio_aceptado", "en_camino", "pago_pendiente", "pagado", "completado"]),
     ).all()
 
     resultado = []
@@ -1585,7 +1587,7 @@ def _notificar_urgencia(db: Session, nuevo, tipo: str, solo_ciudad: bool):
 def _crear_servicio_interno(db: Session, cliente_id: int, tipo: str, descripcion: Optional[str],
                              urgente: bool, fecha, fontanero_id: Optional[int], gremio: Optional[str],
                              ciudad: Optional[str] = None, latitud_cliente: Optional[float] = None,
-                             longitud_cliente: Optional[float] = None):
+                             longitud_cliente: Optional[float] = None, es_consulta: bool = False):
     fontanero_directo = None
     if fontanero_id:
         fontanero_directo = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
@@ -1598,6 +1600,7 @@ def _crear_servicio_interno(db: Session, cliente_id: int, tipo: str, descripcion
         fecha=fecha,
         estado="pendiente",
         precio=None,
+        es_consulta=es_consulta,
         gremio=fontanero_directo.gremio if fontanero_directo else gremio,
         ciudad=ciudad,
         latitud_cliente=latitud_cliente,
@@ -1606,7 +1609,7 @@ def _crear_servicio_interno(db: Session, cliente_id: int, tipo: str, descripcion
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
-    if fontanero_directo:
+    if fontanero_directo and not es_consulta:
         _crear_notificacion(db, fontanero_directo.usuario_id, "Nueva solicitud", f"Tienes una nueva solicitud de {tipo}", "solicitud_directa", nuevo.id)
         db.commit()
     elif urgente:
@@ -1626,6 +1629,7 @@ def crear_servicio(
         db, current_user["id"], servicio.tipo, servicio.descripcion,
         servicio.urgente, servicio.fecha, servicio.fontanero_id, servicio.gremio,
         servicio.ciudad, servicio.latitud_cliente, servicio.longitud_cliente,
+        servicio.es_consulta,
     )
     return schemas.ServicioRespuesta.from_orm_with_color(nuevo)
 
@@ -1950,15 +1954,92 @@ def enviar_precio(
     ).first()
     if not fontanero or servicio.fontanero_id != fontanero.id:
         raise HTTPException(status_code=403, detail="No puedes enviar precio para un servicio que no es tuyo")
-    if servicio.estado in ("pago_pendiente", "pagado", "cancelado", "rechazado"):
+    if servicio.estado in ("pago_pendiente", "pagado", "cancelado", "rechazado", "completado"):
         raise HTTPException(status_code=400, detail=f"No puedes cambiar el precio de un servicio en estado {servicio.estado}")
     _registrar_auditoria(db, servicio.id, "precio", servicio.precio, datos.precio, current_user)
     _registrar_auditoria(db, servicio.id, "estado", servicio.estado, "precio_enviado", current_user)
     servicio.precio = datos.precio
     servicio.estado = "precio_enviado"
-    _crear_notificacion(db, servicio.cliente_id, "Precio recibido", f"El fontanero ha enviado un presupuesto de {datos.precio}€", "precio_enviado", servicio.id)
+    _crear_notificacion(db, servicio.cliente_id, "Precio recibido", f"El fontanero ha enviado un presupuesto de {datos.precio}€. Revísalo y acéptalo para continuar", "precio_enviado", servicio.id)
     db.commit()
     return {"mensaje": "Precio enviado al cliente", "precio": datos.precio}
+
+@app.put("/servicios/{servicio_id}/precio/aceptar")
+def aceptar_precio(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """El cliente acepta el precio propuesto: recién a partir de aquí el profesional
+    puede ir a hacer el trabajo. Aceptar el precio NO es pagar — el pago solo se
+    habilita cuando el profesional marca el trabajo como terminado (/completar)."""
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    if servicio.cliente_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Solo el cliente puede aceptar el precio de este servicio")
+    if servicio.estado != "precio_enviado":
+        raise HTTPException(status_code=400, detail=f"No hay ningún precio pendiente de aceptar (estado: {servicio.estado})")
+    _registrar_auditoria(db, servicio.id, "estado", servicio.estado, "precio_aceptado", current_user)
+    servicio.estado = "precio_aceptado"
+    if servicio.fontanero_id:
+        fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
+        if fontanero_obj and fontanero_obj.usuario_id:
+            _crear_notificacion(db, fontanero_obj.usuario_id, "✅ Precio aceptado", f"El cliente aceptó tu presupuesto de {servicio.precio}€. Ya puedes ir a hacer el trabajo", "precio_aceptado", servicio.id)
+    db.commit()
+    return {"mensaje": "Precio aceptado", "estado": servicio.estado}
+
+@app.put("/servicios/{servicio_id}/precio/rechazar")
+def rechazar_precio(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """El cliente rechaza el precio propuesto: no cancela el servicio, solo permite
+    que el profesional proponga uno nuevo (por ejemplo tras seguir hablando en el chat)."""
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    if servicio.cliente_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Solo el cliente puede rechazar el precio de este servicio")
+    if servicio.estado != "precio_enviado":
+        raise HTTPException(status_code=400, detail=f"No hay ningún precio pendiente de rechazar (estado: {servicio.estado})")
+    precio_anterior = servicio.precio
+    nuevo_estado = "pendiente" if servicio.es_consulta else "aceptado"
+    _registrar_auditoria(db, servicio.id, "estado", servicio.estado, nuevo_estado, current_user)
+    servicio.estado = nuevo_estado
+    servicio.precio = None
+    if servicio.fontanero_id:
+        fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
+        if fontanero_obj and fontanero_obj.usuario_id:
+            _crear_notificacion(db, fontanero_obj.usuario_id, "❌ Precio rechazado", f"El cliente rechazó tu presupuesto de {precio_anterior}€. Puedes proponer uno nuevo", "precio_rechazado", servicio.id)
+    db.commit()
+    return {"mensaje": "Precio rechazado", "estado": servicio.estado}
+
+@app.put("/servicios/{servicio_id}/completar")
+def completar_servicio(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """El profesional marca el trabajo como terminado. Solo a partir de aquí el
+    cliente puede pagar — antes de esto no debe existir ninguna forma de pagar
+    ni de que el trabajo aparezca como cobrado."""
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == current_user["id"]
+    ).first()
+    if not fontanero or servicio.fontanero_id != fontanero.id:
+        raise HTTPException(status_code=403, detail="Este servicio no es tuyo")
+    if servicio.estado not in ("precio_aceptado", "en_camino"):
+        raise HTTPException(status_code=400, detail=f"No puedes marcar como terminado un servicio en estado {servicio.estado}")
+    _registrar_auditoria(db, servicio.id, "estado", servicio.estado, "completado", current_user)
+    servicio.estado = "completado"
+    _crear_notificacion(db, servicio.cliente_id, "🏁 Trabajo terminado", f"{fontanero.nombre} marcó el trabajo como terminado. Ya puedes pagar", "trabajo_terminado", servicio.id)
+    db.commit()
+    return {"mensaje": "Servicio marcado como terminado", "estado": servicio.estado}
 
 class PagoUpdate(BaseModel):
     metodo: Literal["efectivo", "bizum"]
@@ -1986,6 +2067,8 @@ def confirmar_pago(
         raise HTTPException(status_code=400, detail="El fontanero aún no ha enviado el precio")
     if servicio.estado == "pagado":
         raise HTTPException(status_code=400, detail="Este servicio ya está pagado")
+    if servicio.estado != "completado":
+        raise HTTPException(status_code=400, detail="El profesional aún no ha marcado el trabajo como terminado")
     nuevo_estado = "pago_pendiente"
     _registrar_auditoria(db, servicio.id, "estado", servicio.estado, nuevo_estado, current_user)
     servicio.estado = nuevo_estado
@@ -2962,7 +3045,7 @@ def marcar_en_camino(
     ).first()
     if not fontanero or servicio.fontanero_id != fontanero.id:
         raise HTTPException(status_code=403, detail="Este servicio no es tuyo")
-    if servicio.estado not in ["aceptado", "precio_enviado"]:
+    if servicio.estado != "precio_aceptado":
         raise HTTPException(status_code=400, detail=f"No puedes marcar en camino un servicio en estado {servicio.estado}")
     servicio.estado = "en_camino"
     _crear_notificacion(db, servicio.cliente_id, "🚗 Tu profesional va en camino",
@@ -3891,6 +3974,8 @@ def crear_stripe_checkout(
         raise HTTPException(status_code=403, detail="Solo el cliente puede pagar este servicio")
     if servicio.estado == "pagado":
         raise HTTPException(status_code=400, detail="Este servicio ya está pagado")
+    if servicio.estado != "completado":
+        raise HTTPException(status_code=400, detail="El profesional aún no ha marcado el trabajo como terminado")
 
     fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
 

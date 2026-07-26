@@ -121,15 +121,18 @@ class ServicioCrear(BaseModel):
     ciudad: Optional[str] = None
     latitud_cliente: Optional[float] = None
     longitud_cliente: Optional[float] = None
+    es_consulta: bool = False
 
 ESTADO_COLORES = {
     "pendiente": "#D97706",
     "aceptado": "#0A7A3E",
-    "en_camino": "#1A56DB",
-    "rechazado": "#C8271A",
-    "pagado": "#0A7A3E",
     "precio_enviado": "#1A56DB",
+    "precio_aceptado": "#1A56DB",
+    "en_camino": "#1A56DB",
     "completado": "#0A7A3E",
+    "pago_pendiente": "#7356BF",
+    "pagado": "#0A7A3E",
+    "rechazado": "#C8271A",
     "cancelado": "#C8271A",
 }
 
@@ -141,6 +144,7 @@ class ServicioRespuesta(BaseModel):
     descripcion: Optional[str] = None
     urgente: bool
     urgencia_ia: Optional[str] = None
+    es_consulta: bool = False
     estado: str
     estado_color: Optional[str] = None
     precio: Optional[float] = None

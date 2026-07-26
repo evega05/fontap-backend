@@ -65,6 +65,7 @@ class Servicio(Base):
     latitud_cliente = Column(Float, nullable=True)
     longitud_cliente = Column(Float, nullable=True)
     aviso_proximidad_enviado = Column(Boolean, default=False)
+    es_consulta = Column(Boolean, default=False)  # True: solo quiere hablar antes de contratar, no se le fuerza precio/aceptar
     estado = Column(String, default="pendiente")
     precio = Column(Float, nullable=True)
     metodo_pago = Column(String, nullable=True)
