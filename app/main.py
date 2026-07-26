@@ -2996,6 +2996,8 @@ def seguimiento_servicio(
         "latitud": fontanero.latitud if fontanero else None,
         "longitud": fontanero.longitud if fontanero else None,
         "ubicacion_actualizada": fontanero.ubicacion_actualizada.isoformat() if fontanero and fontanero.ubicacion_actualizada else None,
+        "latitud_cliente": servicio.latitud_cliente,
+        "longitud_cliente": servicio.longitud_cliente,
     }
 
 # ─── ETA ───────────────────────────────────────────────────────────────────────
