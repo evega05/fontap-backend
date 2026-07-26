@@ -1561,6 +1561,9 @@ def ver_solicitudes_fontanero(
             "fecha": str(s.fecha) if s.fecha else None,
             "cliente_nombre": cliente.nombre if cliente else "Cliente",
             "zona": "Bilbao",
+            "eta_minutos": s.eta_minutos,
+            "latitud_cliente": s.latitud_cliente,
+            "longitud_cliente": s.longitud_cliente,
         })
     return resultado
 
@@ -3053,6 +3056,29 @@ def marcar_en_camino(
                         "en_camino", servicio_id)
     db.commit()
     return {"mensaje": "Marcado en camino", "estado": servicio.estado}
+
+@app.put("/servicios/{servicio_id}/llegue")
+def marcar_llegada(
+    servicio_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """El profesional avisa manualmente que ya llegó (además del aviso automático
+    por proximidad GPS): no cambia el estado, solo notifica al cliente al instante."""
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == current_user["id"]
+    ).first()
+    if not fontanero or servicio.fontanero_id != fontanero.id:
+        raise HTTPException(status_code=403, detail="Este servicio no es tuyo")
+    if servicio.estado != "en_camino":
+        raise HTTPException(status_code=400, detail=f"No puedes avisar la llegada en un servicio en estado {servicio.estado}")
+    _crear_notificacion(db, servicio.cliente_id, "🔔 Tu profesional ha llegado",
+                        f"{fontanero.nombre} está en tu domicilio", "llegada", servicio_id)
+    db.commit()
+    return {"mensaje": "Llegada notificada"}
 
 @app.get("/servicios/{servicio_id}/seguimiento")
 def seguimiento_servicio(
