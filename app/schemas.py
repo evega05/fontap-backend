@@ -66,6 +66,7 @@ class FontaneroRespuesta(BaseModel):
     codigo_referido: Optional[str] = None
     primeros_trabajos_gratis: int = 0
     google_calendar_conectado: bool = False
+    miembro_desde: Optional[datetime.datetime] = None
     class Config:
         from_attributes = True
 
@@ -374,6 +375,7 @@ class ResenaRespuesta(BaseModel):
     trato: float
     comentario: Optional[str] = None
     creado_en: datetime.datetime
+    cliente_nombre: Optional[str] = None
 
 class ResenaClienteCrear(BaseModel):
     puntualidad: float

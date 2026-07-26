@@ -2640,6 +2640,8 @@ def ver_perfil_fontanero(
     # a cualquier otra persona que consulte este perfil público no se le expone.
     if current_user.get("id") != fontanero_id:
         item.codigo_referido = None
+    usuario = db.query(models.Usuario).filter(models.Usuario.id == fontanero_id).first()
+    item.miembro_desde = usuario.creado_en if usuario else None
     return item
 
 @app.get("/fontaneros/{fontanero_id}/checklist-perfil")
@@ -3502,9 +3504,16 @@ def ver_resenas(fontanero_id: int, db: Session = Depends(get_db)):
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
-    return db.query(models.Resena).filter(
+    resenas = db.query(models.Resena).filter(
         models.Resena.fontanero_id == fontanero.id
     ).order_by(models.Resena.creado_en.desc()).all()
+    resultado = []
+    for r in resenas:
+        item = schemas.ResenaRespuesta.model_validate(r, from_attributes=True)
+        cliente = db.query(models.Usuario).filter(models.Usuario.id == r.cliente_id).first()
+        item.cliente_nombre = cliente.nombre if cliente else "Cliente"
+        resultado.append(item)
+    return resultado
 
 @app.post("/servicios/{servicio_id}/resena-cliente", response_model=schemas.ResenaClienteRespuesta)
 def crear_resena_cliente(
