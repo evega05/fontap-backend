@@ -70,6 +70,8 @@ class FontaneroRespuesta(BaseModel):
     favorito_preferente: bool = False
     nombre_empresa: Optional[str] = None
     empresa_id: Optional[int] = None
+    empresa_nombre: Optional[str] = None
+    logo_empresa_url: Optional[str] = None
     class Config:
         from_attributes = True
 
@@ -78,6 +80,20 @@ class FavoritoPreferenteActualizar(BaseModel):
 
 class EmpresaActualizar(BaseModel):
     nombre_empresa: Optional[str] = None
+    comision_empresa_porcentaje: Optional[float] = None
+
+class ComisionEmpresaEmpleado(BaseModel):
+    empleado_id: int
+    empleado_nombre: str
+    total: float
+    num_servicios: int
+
+class ComisionEmpresaRespuesta(BaseModel):
+    total: float
+    por_empleado: List[ComisionEmpresaEmpleado]
+
+class ComisionEmpresaLiquidar(BaseModel):
+    empleado_fontanero_id: int
 
 class EquipoInvitarCrear(BaseModel):
     email: EmailStr
@@ -93,6 +109,9 @@ class EquipoMiembroRespuesta(BaseModel):
     disponible: bool
     valoracion: Optional[float] = None
     num_trabajos: int = 0
+    latitud: Optional[float] = None
+    longitud: Optional[float] = None
+    ubicacion_actualizada: Optional[datetime.datetime] = None
     class Config:
         from_attributes = True
 

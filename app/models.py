@@ -51,6 +51,8 @@ class Fontanero(Base):
     google_calendar_conectado = Column(Boolean, default=False)
     nombre_empresa = Column(String, nullable=True)  # si tiene equipo, el nombre comercial que ven sus empleados
     empresa_id = Column(Integer, ForeignKey("fontaneros.id"), nullable=True)  # si es empleado de otro profesional
+    logo_empresa_url = Column(String, nullable=True)
+    comision_empresa_porcentaje = Column(Float, nullable=True)  # % que se queda el dueño de lo que factura cada empleado
 
 class Servicio(Base):
     __tablename__ = "servicios"
@@ -79,6 +81,9 @@ class Servicio(Base):
     google_event_id = Column(String, nullable=True)
     fontanero_preferente_id = Column(Integer, ForeignKey("fontaneros.id"), nullable=True)
     prioridad_hasta = Column(DateTime, nullable=True)
+    empresa_id = Column(Integer, ForeignKey("fontaneros.id"), nullable=True)  # dueño al que le corresponde la comisión de este trabajo
+    comision_empresa_aplicada = Column(Float, nullable=True)
+    comision_empresa_liquidada = Column(Boolean, default=False)
     creado_en = Column(DateTime, default=utcnow)
 
 class ServicioFontanero(Base):

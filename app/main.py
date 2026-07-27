@@ -77,6 +77,8 @@ def _migrar_columnas_faltantes():
             "google_calendar_conectado": "BOOLEAN DEFAULT FALSE",
             "nombre_empresa": "VARCHAR",
             "empresa_id": "INTEGER",
+            "logo_empresa_url": "VARCHAR",
+            "comision_empresa_porcentaje": "FLOAT",
         },
         "usuarios": {
             "terminos_aceptados": "BOOLEAN DEFAULT FALSE",
@@ -95,6 +97,9 @@ def _migrar_columnas_faltantes():
             "es_consulta": "BOOLEAN DEFAULT FALSE",
             "fontanero_preferente_id": "INTEGER",
             "prioridad_hasta": "TIMESTAMP",
+            "empresa_id": "INTEGER",
+            "comision_empresa_aplicada": "FLOAT",
+            "comision_empresa_liquidada": "BOOLEAN DEFAULT FALSE",
         },
         "favoritos": {
             "preferente": "BOOLEAN DEFAULT FALSE",
@@ -286,6 +291,23 @@ def _aplicar_comision_atomica(db: Session, fontanero) -> float:
         # en la base de datos, que no quedaba ninguno) y devolvería 0% igualmente.
         db.refresh(fontanero)
     return _tasa_comision(fontanero)
+
+def _aplicar_comision_empresa(db: Session, servicio) -> None:
+    """Si el profesional que cobró este trabajo es empleado de un equipo con un
+    porcentaje de comisión configurado, calcula lo que le corresponde al dueño
+    de la empresa. Es solo un apunte interno (la empresa y el empleado se lo
+    reparten aparte); no afecta a la comisión de la plataforma ni a Stripe."""
+    if not servicio.fontanero_id:
+        return
+    empleado = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
+    if not empleado or not empleado.empresa_id:
+        return
+    dueño = db.query(models.Fontanero).filter(models.Fontanero.id == empleado.empresa_id).first()
+    if not dueño or not dueño.comision_empresa_porcentaje:
+        return
+    servicio.empresa_id = dueño.id
+    servicio.comision_empresa_aplicada = round((servicio.precio or 0) * dueño.comision_empresa_porcentaje / 100, 2)
+    servicio.comision_empresa_liquidada = False
 
 def _num_servicios_comision_pendiente(db: Session, fontanero) -> int:
     return db.query(models.Servicio).filter(
@@ -2320,6 +2342,7 @@ def _confirmar_pago_directo(db: Session, servicio_id: int, current_user: dict, e
     _registrar_auditoria(db, servicio.id, "estado", "pago_pendiente", "pagado", current_user)
     servicio.comision_aplicada = round((servicio.precio or 0) * _aplicar_comision_atomica(db, fontanero), 2)
     servicio.comision_liquidada = False
+    _aplicar_comision_empresa(db, servicio)
     _crear_notificacion(db, servicio.cliente_id, "Pago confirmado", f"El profesional confirmó haber recibido tu pago en {etiqueta}", "pago_confirmado", servicio_id)
     db.commit()
     return {"mensaje": f"{etiqueta} confirmado"}
@@ -2886,6 +2909,13 @@ def ver_perfil_fontanero(
         item.codigo_referido = None
     usuario = db.query(models.Usuario).filter(models.Usuario.id == fontanero_id).first()
     item.miembro_desde = usuario.creado_en if usuario else None
+    if fontanero.nombre_empresa:
+        item.empresa_nombre = fontanero.nombre_empresa
+    elif fontanero.empresa_id:
+        dueño = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero.empresa_id).first()
+        if dueño:
+            item.empresa_nombre = dueño.nombre_empresa
+            item.logo_empresa_url = dueño.logo_empresa_url
     return item
 
 @app.get("/fontaneros/{fontanero_id}/checklist-perfil")
@@ -3462,7 +3492,12 @@ def actualizar_empresa(
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
     if fontanero.empresa_id:
         raise HTTPException(status_code=400, detail="Ya eres empleado de un equipo: no puedes crear tu propia empresa")
-    fontanero.nombre_empresa = datos.nombre_empresa
+    if datos.nombre_empresa is not None:
+        fontanero.nombre_empresa = datos.nombre_empresa
+    if datos.comision_empresa_porcentaje is not None:
+        if not (0 <= datos.comision_empresa_porcentaje <= 100):
+            raise HTTPException(status_code=422, detail="El porcentaje debe estar entre 0 y 100")
+        fontanero.comision_empresa_porcentaje = datos.comision_empresa_porcentaje
     db.commit()
     db.refresh(fontanero)
     return fontanero
@@ -3563,6 +3598,10 @@ def quitar_del_equipo(
     if not es_dueño and not es_el_mismo:
         raise HTTPException(status_code=403, detail="No puedes gestionar ese equipo")
     empleado.empresa_id = None
+    if es_dueño and not es_el_mismo and empleado.usuario_id:
+        _crear_notificacion(db, empleado.usuario_id, "Has salido de un equipo",
+                             f"{quien_pide.nombre_empresa or quien_pide.nombre} te ha quitado de su equipo",
+                             "equipo_expulsion", quien_pide.id)
     db.commit()
     return {"mensaje": "Fuera del equipo"}
 
@@ -3599,6 +3638,59 @@ def asignar_empleado(
                          f"{empleado.nombre} se encargará de tu servicio", "empleado_asignado", servicio_id)
     db.commit()
     return schemas.ServicioRespuesta.from_orm_with_color(servicio)
+
+@app.get("/fontaneros/{fontanero_id}/comision-empresa-pendiente", response_model=schemas.ComisionEmpresaRespuesta)
+def comision_empresa_pendiente(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Lo que le corresponde al dueño de la empresa de los trabajos que ya han
+    cobrado sus empleados, pendiente de repartirse aparte (no pasa por Stripe)."""
+    _verificar_fontanero_propio(current_user, fontanero_id)
+    dueño = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not dueño:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    pendientes = db.query(models.Servicio).filter(
+        models.Servicio.empresa_id == dueño.id,
+        models.Servicio.comision_empresa_liquidada == False,
+        models.Servicio.comision_empresa_aplicada != None,
+    ).all()
+    por_empleado = {}
+    for s in pendientes:
+        por_empleado.setdefault(s.fontanero_id, []).append(s)
+    resultado = []
+    for empleado_id, servicios in por_empleado.items():
+        empleado = db.query(models.Fontanero).filter(models.Fontanero.id == empleado_id).first()
+        resultado.append(schemas.ComisionEmpresaEmpleado(
+            empleado_id=empleado_id,
+            empleado_nombre=empleado.nombre if empleado else "Profesional",
+            total=round(sum(s.comision_empresa_aplicada for s in servicios), 2),
+            num_servicios=len(servicios),
+        ))
+    total = round(sum(s.comision_empresa_aplicada for s in pendientes), 2)
+    return schemas.ComisionEmpresaRespuesta(total=total, por_empleado=resultado)
+
+@app.put("/fontaneros/{fontanero_id}/comision-empresa-pendiente/liquidar")
+def liquidar_comision_empresa(
+    fontanero_id: int,
+    datos: schemas.ComisionEmpresaLiquidar,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """El dueño marca como saldado lo que le debía un empleado concreto (tras
+    cobrárselo aparte, en efectivo, Bizum, nómina, etc.)."""
+    _verificar_fontanero_propio(current_user, fontanero_id)
+    dueño = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not dueño:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    filas = db.query(models.Servicio).filter(
+        models.Servicio.empresa_id == dueño.id,
+        models.Servicio.fontanero_id == datos.empleado_fontanero_id,
+        models.Servicio.comision_empresa_liquidada == False,
+    ).update({"comision_empresa_liquidada": True}, synchronize_session=False)
+    db.commit()
+    return {"mensaje": f"Comisión liquidada en {filas} servicio(s)"}
 
 # ─── LISTA NEGRA PERSONAL DEL CLIENTE ──────────────────────────────────────────
 # Distinta del veto del admin: aquí el cliente simplemente deja de ver/recibir
@@ -4537,6 +4629,7 @@ def verificar_stripe_checkout(
         db.refresh(servicio)
         servicio.comision_aplicada = round((servicio.precio or 0) * _aplicar_comision_atomica(db, fontanero_obj), 2)
         servicio.comision_liquidada = True  # Stripe ya retuvo/repartió la comisión al cobrar
+        _aplicar_comision_empresa(db, servicio)
         if fontanero_obj and fontanero_obj.usuario_id:
             _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido", f"Pago de {servicio.precio}€ confirmado por Stripe", "pago_recibido", servicio_id)
         db.commit()
