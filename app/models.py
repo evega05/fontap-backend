@@ -49,6 +49,8 @@ class Fontanero(Base):
     primeros_trabajos_gratis = Column(Integer, default=3)  # cuántos leads gratis (sin comisión) le quedan por estrenar
     google_calendar_refresh_token = Column(String, nullable=True)
     google_calendar_conectado = Column(Boolean, default=False)
+    nombre_empresa = Column(String, nullable=True)  # si tiene equipo, el nombre comercial que ven sus empleados
+    empresa_id = Column(Integer, ForeignKey("fontaneros.id"), nullable=True)  # si es empleado de otro profesional
 
 class Servicio(Base):
     __tablename__ = "servicios"

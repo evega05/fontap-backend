@@ -68,11 +68,36 @@ class FontaneroRespuesta(BaseModel):
     google_calendar_conectado: bool = False
     miembro_desde: Optional[datetime.datetime] = None
     favorito_preferente: bool = False
+    nombre_empresa: Optional[str] = None
+    empresa_id: Optional[int] = None
     class Config:
         from_attributes = True
 
 class FavoritoPreferenteActualizar(BaseModel):
     preferente: bool
+
+class EmpresaActualizar(BaseModel):
+    nombre_empresa: Optional[str] = None
+
+class EquipoInvitarCrear(BaseModel):
+    email: EmailStr
+
+class EquipoAceptarCrear(BaseModel):
+    empresa_fontanero_id: int
+
+class EquipoMiembroRespuesta(BaseModel):
+    id: int
+    nombre: str
+    telefono: Optional[str] = None
+    zona: Optional[str] = None
+    disponible: bool
+    valoracion: Optional[float] = None
+    num_trabajos: int = 0
+    class Config:
+        from_attributes = True
+
+class ServicioAsignarEmpleado(BaseModel):
+    empleado_fontanero_id: int
 
 class FontaneroActualizar(BaseModel):
     zona: Optional[str] = None

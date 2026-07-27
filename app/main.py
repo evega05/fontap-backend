@@ -75,6 +75,8 @@ def _migrar_columnas_faltantes():
             "primeros_trabajos_gratis": "INTEGER DEFAULT 3",
             "google_calendar_refresh_token": "VARCHAR",
             "google_calendar_conectado": "BOOLEAN DEFAULT FALSE",
+            "nombre_empresa": "VARCHAR",
+            "empresa_id": "INTEGER",
         },
         "usuarios": {
             "terminos_aceptados": "BOOLEAN DEFAULT FALSE",
@@ -3441,6 +3443,162 @@ def eliminar_favorito(
         db.delete(fav)
         db.commit()
     return {"mensaje": "Eliminado de favoritos"}
+
+# ─── CUENTAS DE EMPRESA (EQUIPOS DE PROFESIONALES) ─────────────────────────────
+# Un profesional puede convertirse en "empresa" (ponerle nombre comercial) e
+# invitar a otros profesionales de su mismo gremio a su equipo. Los trabajos que
+# recibe la empresa se pueden reasignar a cualquier empleado libre.
+
+@app.put("/fontaneros/{fontanero_id}/empresa", response_model=schemas.FontaneroRespuesta)
+def actualizar_empresa(
+    fontanero_id: int,
+    datos: schemas.EmpresaActualizar,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _verificar_fontanero_propio(current_user, fontanero_id)
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    if fontanero.empresa_id:
+        raise HTTPException(status_code=400, detail="Ya eres empleado de un equipo: no puedes crear tu propia empresa")
+    fontanero.nombre_empresa = datos.nombre_empresa
+    db.commit()
+    db.refresh(fontanero)
+    return fontanero
+
+@app.post("/fontaneros/{fontanero_id}/equipo/invitar")
+def invitar_a_equipo(
+    fontanero_id: int,
+    datos: schemas.EquipoInvitarCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _verificar_fontanero_propio(current_user, fontanero_id)
+    dueño = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not dueño:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    if not dueño.nombre_empresa:
+        raise HTTPException(status_code=400, detail="Primero ponle un nombre a tu empresa antes de invitar")
+    if dueño.empresa_id:
+        raise HTTPException(status_code=400, detail="Eres empleado de otro equipo: no puedes tener el tuyo propio")
+    usuario_invitado = db.query(models.Usuario).filter(models.Usuario.email == datos.email.lower()).first()
+    if not usuario_invitado:
+        raise HTTPException(status_code=404, detail="No existe ninguna cuenta con ese email")
+    invitado = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == usuario_invitado.id).first()
+    if not invitado:
+        raise HTTPException(status_code=404, detail="Esa cuenta no es de un profesional")
+    if invitado.id == dueño.id:
+        raise HTTPException(status_code=400, detail="No puedes invitarte a ti mismo")
+    if invitado.gremio != dueño.gremio:
+        raise HTTPException(status_code=400, detail="Solo puedes invitar a profesionales de tu mismo gremio")
+    if invitado.empresa_id:
+        raise HTTPException(status_code=400, detail="Ese profesional ya forma parte de un equipo")
+    _crear_notificacion(db, usuario_invitado.id, "🤝 Invitación a un equipo",
+                         f"{dueño.nombre_empresa} te invita a unirte a su equipo de {dueño.gremio}",
+                         "invitacion_equipo", dueño.id)
+    db.commit()
+    return {"mensaje": "Invitación enviada"}
+
+@app.put("/fontaneros/{fontanero_id}/equipo/aceptar")
+def aceptar_invitacion_equipo(
+    fontanero_id: int,
+    datos: schemas.EquipoAceptarCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _verificar_fontanero_propio(current_user, fontanero_id)
+    invitado = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not invitado:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    invitacion = db.query(models.Notificacion).filter(
+        models.Notificacion.usuario_id == fontanero_id,
+        models.Notificacion.tipo == "invitacion_equipo",
+        models.Notificacion.referencia_id == datos.empresa_fontanero_id,
+    ).order_by(models.Notificacion.id.desc()).first()
+    if not invitacion:
+        raise HTTPException(status_code=404, detail="No tienes ninguna invitación pendiente de ese equipo")
+    dueño = db.query(models.Fontanero).filter(models.Fontanero.id == datos.empresa_fontanero_id).first()
+    if not dueño:
+        raise HTTPException(status_code=404, detail="La empresa ya no existe")
+    if invitado.empresa_id:
+        raise HTTPException(status_code=400, detail="Ya formas parte de un equipo")
+    invitado.empresa_id = dueño.id
+    db.commit()
+    if dueño.usuario_id:
+        _crear_notificacion(db, dueño.usuario_id, "✅ Se ha unido a tu equipo",
+                             f"{invitado.nombre} ya forma parte de {dueño.nombre_empresa}", "equipo_miembro", invitado.id)
+    db.commit()
+    return {"mensaje": "Te has unido al equipo"}
+
+@app.get("/fontaneros/{fontanero_id}/equipo", response_model=List[schemas.EquipoMiembroRespuesta])
+def listar_equipo(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _verificar_fontanero_propio(current_user, fontanero_id)
+    dueño = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not dueño:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    return db.query(models.Fontanero).filter(models.Fontanero.empresa_id == dueño.id).all()
+
+@app.delete("/fontaneros/{fontanero_id}/equipo/{empleado_id}")
+def quitar_del_equipo(
+    fontanero_id: int,
+    empleado_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """El dueño puede echar a un empleado, y un empleado puede salir del equipo él mismo."""
+    _verificar_fontanero_propio(current_user, fontanero_id)
+    quien_pide = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not quien_pide:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    empleado = db.query(models.Fontanero).filter(models.Fontanero.id == empleado_id).first()
+    if not empleado or not empleado.empresa_id:
+        raise HTTPException(status_code=404, detail="Ese profesional no está en un equipo")
+    es_dueño = empleado.empresa_id == quien_pide.id
+    es_el_mismo = empleado.id == quien_pide.id
+    if not es_dueño and not es_el_mismo:
+        raise HTTPException(status_code=403, detail="No puedes gestionar ese equipo")
+    empleado.empresa_id = None
+    db.commit()
+    return {"mensaje": "Fuera del equipo"}
+
+@app.put("/servicios/{servicio_id}/asignar-empleado", response_model=schemas.ServicioRespuesta)
+def asignar_empleado(
+    servicio_id: int,
+    datos: schemas.ServicioAsignarEmpleado,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """El dueño de la empresa reparte un trabajo que le entró a él a uno de sus
+    empleados libres, sin tener que hacerlo él mismo."""
+    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
+    if not servicio:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+    dueño = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
+    if not dueño or servicio.fontanero_id != dueño.id:
+        raise HTTPException(status_code=403, detail="Este servicio no es tuyo")
+    if servicio.estado in ["pagado", "completado", "cancelado", "rechazado"]:
+        raise HTTPException(status_code=400, detail="Este servicio ya no se puede reasignar")
+    empleado = db.query(models.Fontanero).filter(
+        models.Fontanero.id == datos.empleado_fontanero_id,
+        models.Fontanero.empresa_id == dueño.id,
+    ).first()
+    if not empleado:
+        raise HTTPException(status_code=404, detail="Ese profesional no es un empleado de tu equipo")
+    servicio.fontanero_id = empleado.id
+    db.commit()
+    if empleado.usuario_id:
+        _crear_notificacion(db, empleado.usuario_id, "📋 Nuevo trabajo asignado",
+                             f"{dueño.nombre_empresa or dueño.nombre} te ha asignado un trabajo de {servicio.tipo}",
+                             "trabajo_asignado", servicio_id)
+    _crear_notificacion(db, servicio.cliente_id, "Profesional asignado",
+                         f"{empleado.nombre} se encargará de tu servicio", "empleado_asignado", servicio_id)
+    db.commit()
+    return schemas.ServicioRespuesta.from_orm_with_color(servicio)
 
 # ─── LISTA NEGRA PERSONAL DEL CLIENTE ──────────────────────────────────────────
 # Distinta del veto del admin: aquí el cliente simplemente deja de ver/recibir
