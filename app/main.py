@@ -5659,3 +5659,657 @@ def _bucle_ampliar_radio_urgencias():
 
 if os.getenv("DESACTIVAR_RECORDATORIOS", "") != "1":
     threading.Thread(target=_bucle_ampliar_radio_urgencias, daemon=True).start()
+
+# ═══ PANEL DE GESTIÓN ═══════════════════════════════════════════════════════
+# Agenda, clientes/leads, obras, presupuestos y nómina propios del profesional.
+# Todo pertenece a un fontanero_id; current_user siempre se resuelve a su
+# propio Fontanero (nadie gestiona los datos de otro).
+
+def _gestion_fontanero(db: Session, current_user: dict) -> models.Fontanero:
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="No tienes perfil de profesional")
+    return fontanero
+
+def _gestion_buscar_o_crear_cliente(db: Session, fontanero_id: int, nombre: str) -> models.FichaCliente:
+    nombre = nombre.strip()
+    existente = db.query(models.FichaCliente).filter(
+        models.FichaCliente.fontanero_id == fontanero_id,
+        func.lower(models.FichaCliente.nombre) == nombre.lower(),
+    ).first()
+    if existente:
+        return existente
+    nuevo = models.FichaCliente(fontanero_id=fontanero_id, nombre=nombre)
+    db.add(nuevo)
+    db.commit()
+    db.refresh(nuevo)
+    return nuevo
+
+# ─── Clientes ───────────────────────────────────────────────────────────────
+
+@app.get("/gestion/clientes", response_model=List[schemas.GestionClienteRespuesta])
+def gestion_listar_clientes(db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    clientes = db.query(models.FichaCliente).filter(
+        models.FichaCliente.fontanero_id == fontanero.id
+    ).order_by(models.FichaCliente.nombre).all()
+    resultado = []
+    for c in clientes:
+        data = schemas.GestionClienteRespuesta.model_validate(c)
+        ultima = db.query(models.GestionVisita).filter(
+            models.GestionVisita.cliente_id == c.id
+        ).order_by(models.GestionVisita.fecha.desc()).first()
+        data.ultima_visita = ultima.fecha if ultima else None
+        resultado.append(data)
+    return resultado
+
+@app.post("/gestion/clientes", response_model=schemas.GestionClienteRespuesta)
+def gestion_crear_cliente(datos: schemas.GestionClienteCrear, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    cliente = models.FichaCliente(fontanero_id=fontanero.id, **datos.model_dump())
+    db.add(cliente)
+    db.commit()
+    db.refresh(cliente)
+    return cliente
+
+@app.put("/gestion/clientes/{cliente_id}", response_model=schemas.GestionClienteRespuesta)
+def gestion_actualizar_cliente(cliente_id: int, datos: schemas.GestionClienteActualizar, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    cliente = db.query(models.FichaCliente).filter(models.FichaCliente.id == cliente_id, models.FichaCliente.fontanero_id == fontanero.id).first()
+    if not cliente:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    for campo, valor in datos.model_dump(exclude_unset=True).items():
+        setattr(cliente, campo, valor)
+    db.commit()
+    db.refresh(cliente)
+    return cliente
+
+@app.delete("/gestion/clientes/{cliente_id}")
+def gestion_eliminar_cliente(cliente_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    db.query(models.FichaCliente).filter(models.FichaCliente.id == cliente_id, models.FichaCliente.fontanero_id == fontanero.id).delete()
+    db.commit()
+    return {"mensaje": "Cliente eliminado"}
+
+# ─── Leads ──────────────────────────────────────────────────────────────────
+
+@app.get("/gestion/leads", response_model=List[schemas.GestionLeadRespuesta])
+def gestion_listar_leads(db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    return db.query(models.GestionLead).filter(models.GestionLead.fontanero_id == fontanero.id).order_by(models.GestionLead.id.desc()).all()
+
+@app.post("/gestion/leads", response_model=schemas.GestionLeadRespuesta)
+def gestion_crear_lead(datos: schemas.GestionLeadCrear, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    lead = models.GestionLead(fontanero_id=fontanero.id, **datos.model_dump())
+    db.add(lead)
+    db.commit()
+    db.refresh(lead)
+    return lead
+
+@app.put("/gestion/leads/{lead_id}", response_model=schemas.GestionLeadRespuesta)
+def gestion_actualizar_lead(lead_id: int, datos: schemas.GestionLeadActualizar, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    lead = db.query(models.GestionLead).filter(models.GestionLead.id == lead_id, models.GestionLead.fontanero_id == fontanero.id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead no encontrado")
+    lead.estado = datos.estado
+    db.commit()
+    db.refresh(lead)
+    return lead
+
+@app.delete("/gestion/leads/{lead_id}")
+def gestion_eliminar_lead(lead_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    db.query(models.GestionLead).filter(models.GestionLead.id == lead_id, models.GestionLead.fontanero_id == fontanero.id).delete()
+    db.commit()
+    return {"mensaje": "Lead eliminado"}
+
+@app.post("/gestion/leads/{lead_id}/convertir", response_model=schemas.GestionClienteRespuesta)
+def gestion_convertir_lead(lead_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    lead = db.query(models.GestionLead).filter(models.GestionLead.id == lead_id, models.GestionLead.fontanero_id == fontanero.id).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead no encontrado")
+    cliente = models.FichaCliente(
+        fontanero_id=fontanero.id, nombre=lead.nombre, telefono=lead.telefono,
+        notas=f"Pedía: {lead.gremio}" if lead.gremio else None,
+    )
+    db.add(cliente)
+    lead.estado = "convertido"
+    db.commit()
+    db.refresh(cliente)
+    return cliente
+
+# ─── Visitas ────────────────────────────────────────────────────────────────
+
+@app.get("/gestion/visitas", response_model=List[schemas.GestionVisitaRespuesta])
+def gestion_listar_visitas(fecha: Optional[str] = None, desde: Optional[str] = None, hasta: Optional[str] = None,
+                            db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    query = db.query(models.GestionVisita).filter(models.GestionVisita.fontanero_id == fontanero.id)
+    if fecha:
+        query = query.filter(models.GestionVisita.fecha == fecha)
+    if desde:
+        query = query.filter(models.GestionVisita.fecha >= desde)
+    if hasta:
+        query = query.filter(models.GestionVisita.fecha <= hasta)
+    visitas = query.order_by(models.GestionVisita.hora).all()
+    resultado = []
+    for v in visitas:
+        data = schemas.GestionVisitaRespuesta.model_validate(v)
+        cliente = db.query(models.FichaCliente).filter(models.FichaCliente.id == v.cliente_id).first()
+        data.cliente_nombre = cliente.nombre if cliente else None
+        resultado.append(data)
+    return resultado
+
+@app.post("/gestion/visitas", response_model=schemas.GestionVisitaRespuesta)
+def gestion_crear_visita(datos: schemas.GestionVisitaCrear, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    cliente = _gestion_buscar_o_crear_cliente(db, fontanero.id, datos.cliente_nombre)
+    visita = models.GestionVisita(
+        fontanero_id=fontanero.id, cliente_id=cliente.id, fecha=datos.fecha, hora=datos.hora,
+        tipo=datos.tipo, direccion=datos.direccion, notas=datos.notas,
+    )
+    db.add(visita)
+    db.commit()
+    db.refresh(visita)
+    resultado = schemas.GestionVisitaRespuesta.model_validate(visita)
+    resultado.cliente_nombre = cliente.nombre
+    return resultado
+
+@app.put("/gestion/visitas/{visita_id}/toggle", response_model=schemas.GestionVisitaRespuesta)
+def gestion_toggle_visita(visita_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    visita = db.query(models.GestionVisita).filter(models.GestionVisita.id == visita_id, models.GestionVisita.fontanero_id == fontanero.id).first()
+    if not visita:
+        raise HTTPException(status_code=404, detail="Visita no encontrada")
+    visita.estado = "pendiente" if visita.estado == "realizado" else "realizado"
+    db.commit()
+    db.refresh(visita)
+    resultado = schemas.GestionVisitaRespuesta.model_validate(visita)
+    cliente = db.query(models.FichaCliente).filter(models.FichaCliente.id == visita.cliente_id).first()
+    resultado.cliente_nombre = cliente.nombre if cliente else None
+    return resultado
+
+@app.delete("/gestion/visitas/{visita_id}")
+def gestion_eliminar_visita(visita_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    db.query(models.GestionVisita).filter(models.GestionVisita.id == visita_id, models.GestionVisita.fontanero_id == fontanero.id).delete()
+    db.commit()
+    return {"mensaje": "Visita eliminada"}
+
+# ─── Cobros ─────────────────────────────────────────────────────────────────
+
+@app.get("/gestion/cobros", response_model=List[schemas.GestionCobroRespuesta])
+def gestion_listar_cobros(fecha: Optional[str] = None, desde: Optional[str] = None, hasta: Optional[str] = None,
+                           db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    query = db.query(models.GestionCobro).filter(models.GestionCobro.fontanero_id == fontanero.id)
+    if fecha:
+        query = query.filter(models.GestionCobro.fecha == fecha)
+    if desde:
+        query = query.filter(models.GestionCobro.fecha >= desde)
+    if hasta:
+        query = query.filter(models.GestionCobro.fecha <= hasta)
+    cobros = query.order_by(models.GestionCobro.hora).all()
+    resultado = []
+    for c in cobros:
+        data = schemas.GestionCobroRespuesta.model_validate(c)
+        cliente = db.query(models.FichaCliente).filter(models.FichaCliente.id == c.cliente_id).first()
+        data.cliente_nombre = cliente.nombre if cliente else None
+        resultado.append(data)
+    return resultado
+
+@app.post("/gestion/cobros", response_model=schemas.GestionCobroRespuesta)
+def gestion_crear_cobro(datos: schemas.GestionCobroCrear, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    cliente = _gestion_buscar_o_crear_cliente(db, fontanero.id, datos.cliente_nombre)
+    cobro = models.GestionCobro(
+        fontanero_id=fontanero.id, cliente_id=cliente.id, fecha=datos.fecha, hora=datos.hora,
+        importe=datos.importe, metodo=datos.metodo,
+    )
+    db.add(cobro)
+    db.commit()
+    db.refresh(cobro)
+    resultado = schemas.GestionCobroRespuesta.model_validate(cobro)
+    resultado.cliente_nombre = cliente.nombre
+    return resultado
+
+@app.put("/gestion/cobros/{cobro_id}/toggle", response_model=schemas.GestionCobroRespuesta)
+def gestion_toggle_cobro(cobro_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    cobro = db.query(models.GestionCobro).filter(models.GestionCobro.id == cobro_id, models.GestionCobro.fontanero_id == fontanero.id).first()
+    if not cobro:
+        raise HTTPException(status_code=404, detail="Cobro no encontrado")
+    cobro.estado = "pendiente" if cobro.estado == "cobrado" else "cobrado"
+    db.commit()
+    db.refresh(cobro)
+    resultado = schemas.GestionCobroRespuesta.model_validate(cobro)
+    cliente = db.query(models.FichaCliente).filter(models.FichaCliente.id == cobro.cliente_id).first()
+    resultado.cliente_nombre = cliente.nombre if cliente else None
+    return resultado
+
+@app.delete("/gestion/cobros/{cobro_id}")
+def gestion_eliminar_cobro(cobro_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    db.query(models.GestionCobro).filter(models.GestionCobro.id == cobro_id, models.GestionCobro.fontanero_id == fontanero.id).delete()
+    db.commit()
+    return {"mensaje": "Cobro eliminado"}
+
+# ─── Tareas sueltas ─────────────────────────────────────────────────────────
+
+@app.get("/gestion/tareas", response_model=List[schemas.GestionTareaRespuesta])
+def gestion_listar_tareas(fecha: Optional[str] = None, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    query = db.query(models.GestionTarea).filter(models.GestionTarea.fontanero_id == fontanero.id)
+    if fecha:
+        query = query.filter(models.GestionTarea.fecha == fecha)
+    return query.order_by(models.GestionTarea.id.desc()).all()
+
+@app.post("/gestion/tareas", response_model=schemas.GestionTareaRespuesta)
+def gestion_crear_tarea(datos: schemas.GestionTareaCrear, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    tarea = models.GestionTarea(fontanero_id=fontanero.id, **datos.model_dump())
+    db.add(tarea)
+    db.commit()
+    db.refresh(tarea)
+    return tarea
+
+@app.put("/gestion/tareas/{tarea_id}/toggle", response_model=schemas.GestionTareaRespuesta)
+def gestion_toggle_tarea(tarea_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    tarea = db.query(models.GestionTarea).filter(models.GestionTarea.id == tarea_id, models.GestionTarea.fontanero_id == fontanero.id).first()
+    if not tarea:
+        raise HTTPException(status_code=404, detail="Tarea no encontrada")
+    tarea.completada = not tarea.completada
+    db.commit()
+    db.refresh(tarea)
+    return tarea
+
+@app.delete("/gestion/tareas/{tarea_id}")
+def gestion_eliminar_tarea(tarea_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    db.query(models.GestionTarea).filter(models.GestionTarea.id == tarea_id, models.GestionTarea.fontanero_id == fontanero.id).delete()
+    db.commit()
+    return {"mensaje": "Tarea eliminada"}
+
+# ─── Obras ──────────────────────────────────────────────────────────────────
+
+def _gestion_obra_con_detalle(db: Session, obra: models.GestionObra) -> schemas.GestionObraRespuesta:
+    data = schemas.GestionObraRespuesta.model_validate(obra)
+    items = db.query(models.GestionObraItem).filter(models.GestionObraItem.obra_id == obra.id).all()
+    data.items = [schemas.GestionObraItemRespuesta.model_validate(i) for i in items]
+    asigs = db.query(models.GestionObraAsignacion).filter(models.GestionObraAsignacion.obra_id == obra.id).all()
+    resultado_asigs = []
+    for a in asigs:
+        ad = schemas.GestionObraAsignacionRespuesta.model_validate(a)
+        empleado = db.query(models.GestionEmpleado).filter(models.GestionEmpleado.id == a.empleado_id).first()
+        ad.empleado_nombre = empleado.nombre if empleado else None
+        ad.empleado_telefono = empleado.telefono if empleado else None
+        resultado_asigs.append(ad)
+    data.asignaciones = resultado_asigs
+    return data
+
+@app.get("/gestion/obras", response_model=List[schemas.GestionObraRespuesta])
+def gestion_listar_obras(db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    obras = db.query(models.GestionObra).filter(models.GestionObra.fontanero_id == fontanero.id).order_by(models.GestionObra.id.desc()).all()
+    return [_gestion_obra_con_detalle(db, o) for o in obras]
+
+@app.post("/gestion/obras", response_model=schemas.GestionObraRespuesta)
+def gestion_crear_obra(datos: schemas.GestionObraCrear, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    obra = models.GestionObra(fontanero_id=fontanero.id, **datos.model_dump())
+    db.add(obra)
+    db.commit()
+    db.refresh(obra)
+    return _gestion_obra_con_detalle(db, obra)
+
+@app.put("/gestion/obras/{obra_id}", response_model=schemas.GestionObraRespuesta)
+def gestion_actualizar_obra(obra_id: int, datos: schemas.GestionObraActualizar, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    obra = db.query(models.GestionObra).filter(models.GestionObra.id == obra_id, models.GestionObra.fontanero_id == fontanero.id).first()
+    if not obra:
+        raise HTTPException(status_code=404, detail="Obra no encontrada")
+    for campo, valor in datos.model_dump(exclude_unset=True).items():
+        setattr(obra, campo, valor)
+    db.commit()
+    db.refresh(obra)
+    return _gestion_obra_con_detalle(db, obra)
+
+@app.delete("/gestion/obras/{obra_id}")
+def gestion_eliminar_obra(obra_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    obra = db.query(models.GestionObra).filter(models.GestionObra.id == obra_id, models.GestionObra.fontanero_id == fontanero.id).first()
+    if not obra:
+        raise HTTPException(status_code=404, detail="Obra no encontrada")
+    db.query(models.GestionObraItem).filter(models.GestionObraItem.obra_id == obra_id).delete()
+    db.query(models.GestionObraAsignacion).filter(models.GestionObraAsignacion.obra_id == obra_id).delete()
+    db.delete(obra)
+    db.commit()
+    return {"mensaje": "Obra eliminada"}
+
+def _gestion_verificar_obra_propia(db: Session, fontanero_id: int, obra_id: int) -> models.GestionObra:
+    obra = db.query(models.GestionObra).filter(models.GestionObra.id == obra_id, models.GestionObra.fontanero_id == fontanero_id).first()
+    if not obra:
+        raise HTTPException(status_code=404, detail="Obra no encontrada")
+    return obra
+
+@app.post("/gestion/obras/{obra_id}/items", response_model=schemas.GestionObraItemRespuesta)
+def gestion_crear_obra_item(obra_id: int, datos: schemas.GestionObraItemCrear, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    _gestion_verificar_obra_propia(db, fontanero.id, obra_id)
+    item = models.GestionObraItem(obra_id=obra_id, **datos.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+@app.put("/gestion/obras/items/{item_id}/toggle", response_model=schemas.GestionObraItemRespuesta)
+def gestion_toggle_obra_item(item_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    item = db.query(models.GestionObraItem).join(
+        models.GestionObra, models.GestionObraItem.obra_id == models.GestionObra.id
+    ).filter(models.GestionObraItem.id == item_id, models.GestionObra.fontanero_id == fontanero.id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Pendiente no encontrado")
+    item.completado = not item.completado
+    db.commit()
+    db.refresh(item)
+    return item
+
+@app.delete("/gestion/obras/items/{item_id}")
+def gestion_eliminar_obra_item(item_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    item = db.query(models.GestionObraItem).join(
+        models.GestionObra, models.GestionObraItem.obra_id == models.GestionObra.id
+    ).filter(models.GestionObraItem.id == item_id, models.GestionObra.fontanero_id == fontanero.id).first()
+    if item:
+        db.delete(item)
+        db.commit()
+    return {"mensaje": "Pendiente eliminado"}
+
+@app.post("/gestion/obras/{obra_id}/asignaciones", response_model=schemas.GestionObraAsignacionRespuesta)
+def gestion_crear_asignacion(obra_id: int, datos: schemas.GestionObraAsignacionCrear, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    _gestion_verificar_obra_propia(db, fontanero.id, obra_id)
+    empleado = db.query(models.GestionEmpleado).filter(models.GestionEmpleado.id == datos.empleado_id, models.GestionEmpleado.fontanero_id == fontanero.id).first()
+    if not empleado:
+        raise HTTPException(status_code=404, detail="Empleado no encontrado")
+    asignacion = models.GestionObraAsignacion(obra_id=obra_id, **datos.model_dump())
+    db.add(asignacion)
+    db.commit()
+    db.refresh(asignacion)
+    resultado = schemas.GestionObraAsignacionRespuesta.model_validate(asignacion)
+    resultado.empleado_nombre = empleado.nombre
+    resultado.empleado_telefono = empleado.telefono
+    return resultado
+
+@app.delete("/gestion/obras/asignaciones/{asignacion_id}")
+def gestion_eliminar_asignacion(asignacion_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    asignacion = db.query(models.GestionObraAsignacion).join(
+        models.GestionObra, models.GestionObraAsignacion.obra_id == models.GestionObra.id
+    ).filter(models.GestionObraAsignacion.id == asignacion_id, models.GestionObra.fontanero_id == fontanero.id).first()
+    if asignacion:
+        db.delete(asignacion)
+        db.commit()
+    return {"mensaje": "Asignación eliminada"}
+
+# ─── Presupuestos ───────────────────────────────────────────────────────────
+
+def _gestion_presupuesto_con_detalle(db: Session, presupuesto: models.GestionPresupuesto) -> schemas.GestionPresupuestoRespuesta:
+    data = schemas.GestionPresupuestoRespuesta.model_validate(presupuesto)
+    lineas = db.query(models.GestionPresupuestoLinea).filter(models.GestionPresupuestoLinea.presupuesto_id == presupuesto.id).all()
+    data.lineas = [schemas.GestionPresupuestoLineaRespuesta.model_validate(l) for l in lineas]
+    subtotal = sum((l.cantidad or 0) * (l.precio_unitario or 0) for l in lineas)
+    data.subtotal = round(subtotal, 2)
+    data.total = round(subtotal * 1.21, 2) if presupuesto.iva else round(subtotal, 2)
+    return data
+
+@app.get("/gestion/presupuestos", response_model=List[schemas.GestionPresupuestoRespuesta])
+def gestion_listar_presupuestos(db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    presupuestos = db.query(models.GestionPresupuesto).filter(
+        models.GestionPresupuesto.fontanero_id == fontanero.id
+    ).order_by(models.GestionPresupuesto.fecha.desc()).all()
+    return [_gestion_presupuesto_con_detalle(db, p) for p in presupuestos]
+
+@app.get("/gestion/presupuestos/catalogo")
+def gestion_catalogo_presupuestos(db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    """Precios usados en presupuestos anteriores, para autocompletar partidas nuevas."""
+    fontanero = _gestion_fontanero(db, current_user)
+    lineas = db.query(models.GestionPresupuestoLinea).join(
+        models.GestionPresupuesto, models.GestionPresupuestoLinea.presupuesto_id == models.GestionPresupuesto.id
+    ).filter(models.GestionPresupuesto.fontanero_id == fontanero.id).order_by(models.GestionPresupuestoLinea.id.desc()).all()
+    catalogo = {}
+    for l in lineas:
+        clave = (l.concepto or "").strip().lower()
+        if not clave:
+            continue
+        if clave not in catalogo:
+            catalogo[clave] = {
+                "concepto": l.concepto.strip(), "gremio": l.gremio, "unidad": l.unidad,
+                "ultimo_precio": l.precio_unitario, "veces_usado": 0, "precios": [],
+            }
+        catalogo[clave]["veces_usado"] += 1
+        catalogo[clave]["precios"].append(l.precio_unitario or 0)
+    resultado = []
+    for c in catalogo.values():
+        precios = c.pop("precios")
+        c["promedio"] = round(sum(precios) / len(precios), 2) if precios else 0
+        resultado.append(c)
+    resultado.sort(key=lambda c: -c["veces_usado"])
+    return resultado
+
+@app.post("/gestion/presupuestos", response_model=schemas.GestionPresupuestoRespuesta)
+def gestion_crear_presupuesto(datos: schemas.GestionPresupuestoCrear, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    presupuesto = models.GestionPresupuesto(
+        fontanero_id=fontanero.id, cliente_nombre=datos.cliente_nombre, nombre=datos.nombre,
+        estado=datos.estado, fecha=datos.fecha, notas=datos.notas, iva=datos.iva,
+    )
+    db.add(presupuesto)
+    db.commit()
+    db.refresh(presupuesto)
+    for linea in datos.lineas:
+        db.add(models.GestionPresupuestoLinea(presupuesto_id=presupuesto.id, **linea.model_dump()))
+    db.commit()
+    return _gestion_presupuesto_con_detalle(db, presupuesto)
+
+@app.put("/gestion/presupuestos/{presupuesto_id}", response_model=schemas.GestionPresupuestoRespuesta)
+def gestion_actualizar_presupuesto(presupuesto_id: int, datos: schemas.GestionPresupuestoActualizar, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    presupuesto = db.query(models.GestionPresupuesto).filter(models.GestionPresupuesto.id == presupuesto_id, models.GestionPresupuesto.fontanero_id == fontanero.id).first()
+    if not presupuesto:
+        raise HTTPException(status_code=404, detail="Presupuesto no encontrado")
+    for campo, valor in datos.model_dump(exclude_unset=True).items():
+        setattr(presupuesto, campo, valor)
+    db.commit()
+    db.refresh(presupuesto)
+    return _gestion_presupuesto_con_detalle(db, presupuesto)
+
+@app.delete("/gestion/presupuestos/{presupuesto_id}")
+def gestion_eliminar_presupuesto(presupuesto_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    presupuesto = db.query(models.GestionPresupuesto).filter(models.GestionPresupuesto.id == presupuesto_id, models.GestionPresupuesto.fontanero_id == fontanero.id).first()
+    if not presupuesto:
+        raise HTTPException(status_code=404, detail="Presupuesto no encontrado")
+    db.query(models.GestionPresupuestoLinea).filter(models.GestionPresupuestoLinea.presupuesto_id == presupuesto_id).delete()
+    db.delete(presupuesto)
+    db.commit()
+    return {"mensaje": "Presupuesto eliminado"}
+
+@app.post("/gestion/presupuestos/{presupuesto_id}/lineas", response_model=schemas.GestionPresupuestoLineaRespuesta)
+def gestion_crear_linea_presupuesto(presupuesto_id: int, datos: schemas.GestionPresupuestoLineaCrear, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    presupuesto = db.query(models.GestionPresupuesto).filter(models.GestionPresupuesto.id == presupuesto_id, models.GestionPresupuesto.fontanero_id == fontanero.id).first()
+    if not presupuesto:
+        raise HTTPException(status_code=404, detail="Presupuesto no encontrado")
+    linea = models.GestionPresupuestoLinea(presupuesto_id=presupuesto_id, **datos.model_dump())
+    db.add(linea)
+    db.commit()
+    db.refresh(linea)
+    return linea
+
+@app.delete("/gestion/presupuestos/lineas/{linea_id}")
+def gestion_eliminar_linea_presupuesto(linea_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    linea = db.query(models.GestionPresupuestoLinea).join(
+        models.GestionPresupuesto, models.GestionPresupuestoLinea.presupuesto_id == models.GestionPresupuesto.id
+    ).filter(models.GestionPresupuestoLinea.id == linea_id, models.GestionPresupuesto.fontanero_id == fontanero.id).first()
+    if linea:
+        db.delete(linea)
+        db.commit()
+    return {"mensaje": "Partida eliminada"}
+
+@app.post("/gestion/presupuestos/{presupuesto_id}/convertir-obra", response_model=schemas.GestionObraRespuesta)
+def gestion_convertir_presupuesto_obra(presupuesto_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    presupuesto = db.query(models.GestionPresupuesto).filter(models.GestionPresupuesto.id == presupuesto_id, models.GestionPresupuesto.fontanero_id == fontanero.id).first()
+    if not presupuesto:
+        raise HTTPException(status_code=404, detail="Presupuesto no encontrado")
+    obra = models.GestionObra(
+        fontanero_id=fontanero.id, nombre=presupuesto.nombre, cliente_nombre=presupuesto.cliente_nombre,
+        estado="En curso", fecha_inicio=todayISO_backend(),
+        notas=f'Generada desde el presupuesto "{presupuesto.nombre}"',
+    )
+    db.add(obra)
+    db.commit()
+    db.refresh(obra)
+    return _gestion_obra_con_detalle(db, obra)
+
+def todayISO_backend() -> str:
+    return datetime.datetime.utcnow().strftime("%Y-%m-%d")
+
+# ─── Empleados (nómina, sin cuenta de app) ─────────────────────────────────
+
+def _gestion_empleado_con_detalle(db: Session, empleado: models.GestionEmpleado) -> schemas.GestionEmpleadoRespuesta:
+    data = schemas.GestionEmpleadoRespuesta.model_validate(empleado)
+    data.dias_pendientes = db.query(models.GestionJornada).filter(
+        models.GestionJornada.empleado_id == empleado.id, models.GestionJornada.pagado == False
+    ).count()
+    mes_actual = datetime.datetime.utcnow().strftime("%Y-%m")
+    pagos_mes = db.query(models.GestionPagoEmpleado).filter(
+        models.GestionPagoEmpleado.empleado_id == empleado.id,
+        models.GestionPagoEmpleado.fecha.like(f"{mes_actual}%"),
+    ).all()
+    data.pagado_este_mes = round(sum(p.importe for p in pagos_mes), 2)
+    return data
+
+@app.get("/gestion/empleados", response_model=List[schemas.GestionEmpleadoRespuesta])
+def gestion_listar_empleados(db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    empleados = db.query(models.GestionEmpleado).filter(models.GestionEmpleado.fontanero_id == fontanero.id).order_by(models.GestionEmpleado.nombre).all()
+    return [_gestion_empleado_con_detalle(db, e) for e in empleados]
+
+@app.post("/gestion/empleados", response_model=schemas.GestionEmpleadoRespuesta)
+def gestion_crear_empleado(datos: schemas.GestionEmpleadoCrear, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    empleado = models.GestionEmpleado(fontanero_id=fontanero.id, **datos.model_dump())
+    db.add(empleado)
+    db.commit()
+    db.refresh(empleado)
+    return _gestion_empleado_con_detalle(db, empleado)
+
+@app.delete("/gestion/empleados/{empleado_id}")
+def gestion_eliminar_empleado(empleado_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    empleado = db.query(models.GestionEmpleado).filter(models.GestionEmpleado.id == empleado_id, models.GestionEmpleado.fontanero_id == fontanero.id).first()
+    if not empleado:
+        raise HTTPException(status_code=404, detail="Empleado no encontrado")
+    db.query(models.GestionJornada).filter(models.GestionJornada.empleado_id == empleado_id).delete()
+    db.query(models.GestionPagoEmpleado).filter(models.GestionPagoEmpleado.empleado_id == empleado_id).delete()
+    db.delete(empleado)
+    db.commit()
+    return {"mensaje": "Empleado eliminado"}
+
+def _gestion_verificar_empleado_propio(db: Session, fontanero_id: int, empleado_id: int) -> models.GestionEmpleado:
+    empleado = db.query(models.GestionEmpleado).filter(models.GestionEmpleado.id == empleado_id, models.GestionEmpleado.fontanero_id == fontanero_id).first()
+    if not empleado:
+        raise HTTPException(status_code=404, detail="Empleado no encontrado")
+    return empleado
+
+@app.get("/gestion/empleados/{empleado_id}/jornadas", response_model=List[schemas.GestionJornadaRespuesta])
+def gestion_listar_jornadas(empleado_id: int, desde: Optional[str] = None, hasta: Optional[str] = None,
+                             db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    _gestion_verificar_empleado_propio(db, fontanero.id, empleado_id)
+    query = db.query(models.GestionJornada).filter(models.GestionJornada.empleado_id == empleado_id)
+    if desde:
+        query = query.filter(models.GestionJornada.fecha >= desde)
+    if hasta:
+        query = query.filter(models.GestionJornada.fecha <= hasta)
+    return query.all()
+
+@app.put("/gestion/empleados/{empleado_id}/jornada")
+def gestion_ciclar_jornada(empleado_id: int, fecha: str, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    """Cada toque avanza el día: sin marcar → asistió (sin pagar) → pagado → sin marcar."""
+    fontanero = _gestion_fontanero(db, current_user)
+    _gestion_verificar_empleado_propio(db, fontanero.id, empleado_id)
+    existente = db.query(models.GestionJornada).filter(
+        models.GestionJornada.empleado_id == empleado_id, models.GestionJornada.fecha == fecha
+    ).first()
+    if not existente:
+        db.add(models.GestionJornada(empleado_id=empleado_id, fecha=fecha, pagado=False))
+        estado = "pendiente"
+    elif not existente.pagado:
+        existente.pagado = True
+        estado = "pagado"
+    else:
+        db.delete(existente)
+        estado = "vacio"
+    db.commit()
+    return {"estado": estado}
+
+@app.put("/gestion/empleados/{empleado_id}/marcar-todo-pagado")
+def gestion_marcar_todo_pagado(empleado_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    _gestion_verificar_empleado_propio(db, fontanero.id, empleado_id)
+    filas = db.query(models.GestionJornada).filter(
+        models.GestionJornada.empleado_id == empleado_id, models.GestionJornada.pagado == False
+    ).update({"pagado": True}, synchronize_session=False)
+    db.commit()
+    return {"mensaje": f"{filas} jornada(s) marcadas como pagadas"}
+
+@app.get("/gestion/empleados/{empleado_id}/pagos", response_model=List[schemas.GestionPagoEmpleadoRespuesta])
+def gestion_listar_pagos_empleado(empleado_id: int, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    _gestion_verificar_empleado_propio(db, fontanero.id, empleado_id)
+    return db.query(models.GestionPagoEmpleado).filter(
+        models.GestionPagoEmpleado.empleado_id == empleado_id
+    ).order_by(models.GestionPagoEmpleado.fecha.desc()).all()
+
+@app.post("/gestion/empleados/{empleado_id}/pagos", response_model=schemas.GestionPagoEmpleadoRespuesta)
+def gestion_crear_pago_empleado(empleado_id: int, datos: schemas.GestionPagoEmpleadoCrear, db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    _gestion_verificar_empleado_propio(db, fontanero.id, empleado_id)
+    pago = models.GestionPagoEmpleado(empleado_id=empleado_id, **datos.model_dump())
+    db.add(pago)
+    db.commit()
+    db.refresh(pago)
+    return pago
+
+# ─── Resumen (badges de la pantalla "Hoy") ─────────────────────────────────
+
+@app.get("/gestion/resumen")
+def gestion_resumen(db: Session = Depends(get_db), current_user: dict = Depends(auth.get_current_user)):
+    fontanero = _gestion_fontanero(db, current_user)
+    leads_nuevos = db.query(models.GestionLead).filter(
+        models.GestionLead.fontanero_id == fontanero.id, models.GestionLead.estado == "nuevo"
+    ).count()
+    empleados_ids = [e.id for e in db.query(models.GestionEmpleado.id).filter(models.GestionEmpleado.fontanero_id == fontanero.id).all()]
+    empleados_sin_pagar = 0
+    if empleados_ids:
+        empleados_sin_pagar = db.query(models.GestionJornada.empleado_id).filter(
+            models.GestionJornada.empleado_id.in_(empleados_ids), models.GestionJornada.pagado == False
+        ).distinct().count()
+    obras_en_curso = db.query(models.GestionObra).filter(
+        models.GestionObra.fontanero_id == fontanero.id, models.GestionObra.estado == "En curso"
+    ).all()
+    obras_con_pendientes = 0
+    for o in obras_en_curso:
+        if db.query(models.GestionObraItem).filter(models.GestionObraItem.obra_id == o.id, models.GestionObraItem.completado == False).first():
+            obras_con_pendientes += 1
+    return {"leads_nuevos": leads_nuevos, "empleados_sin_pagar": empleados_sin_pagar, "obras_con_pendientes": obras_con_pendientes}

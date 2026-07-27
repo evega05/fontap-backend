@@ -346,3 +346,137 @@ class ListaNegraCliente(Base):
     cliente_id = Column(Integer, ForeignKey("usuarios.id"))
     fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
     creado_en = Column(DateTime, default=utcnow)
+
+# ─── PANEL DE GESTIÓN (libro de obra del profesional) ──────────────────────────
+# Herramientas internas de gestión del negocio de un profesional: agenda propia,
+# ficha de clientes/leads, obras con checklist, presupuestos y nómina de un
+# equipo que no tiene por qué usar la app (ayudantes, aprendices...). Todo
+# pertenece a un fontanero_id (el dueño del negocio que lo gestiona).
+
+class FichaCliente(Base):
+    __tablename__ = "gestion_clientes"
+    id = Column(Integer, primary_key=True, index=True)
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    nombre = Column(String)
+    telefono = Column(String, nullable=True)
+    direccion = Column(String, nullable=True)
+    frecuencia = Column(Float, nullable=True)  # visitas estimadas por semana
+    notas = Column(Text, nullable=True)
+    creado_en = Column(DateTime, default=utcnow)
+
+class GestionLead(Base):
+    __tablename__ = "gestion_leads"
+    id = Column(Integer, primary_key=True, index=True)
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    nombre = Column(String)
+    telefono = Column(String, nullable=True)
+    gremio = Column(String, nullable=True)
+    mensaje = Column(Text, nullable=True)
+    estado = Column(String, default="nuevo")  # nuevo, contactado, convertido, descartado
+    creado_en = Column(DateTime, default=utcnow)
+
+class GestionVisita(Base):
+    __tablename__ = "gestion_visitas"
+    id = Column(Integer, primary_key=True, index=True)
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    cliente_id = Column(Integer, ForeignKey("gestion_clientes.id"))
+    fecha = Column(String)  # YYYY-MM-DD
+    hora = Column(String, nullable=True)
+    tipo = Column(String, nullable=True)
+    direccion = Column(String, nullable=True)
+    notas = Column(Text, nullable=True)
+    estado = Column(String, default="pendiente")  # pendiente, realizado
+
+class GestionCobro(Base):
+    __tablename__ = "gestion_cobros"
+    id = Column(Integer, primary_key=True, index=True)
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    cliente_id = Column(Integer, ForeignKey("gestion_clientes.id"))
+    fecha = Column(String)
+    hora = Column(String, nullable=True)
+    importe = Column(Float)
+    metodo = Column(String, default="Efectivo")
+    estado = Column(String, default="pendiente")  # pendiente, cobrado
+
+class GestionTarea(Base):
+    __tablename__ = "gestion_tareas"
+    id = Column(Integer, primary_key=True, index=True)
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    descripcion = Column(String)
+    fecha = Column(String)
+    completada = Column(Boolean, default=False)
+
+class GestionObra(Base):
+    __tablename__ = "gestion_obras"
+    id = Column(Integer, primary_key=True, index=True)
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    nombre = Column(String)
+    cliente_nombre = Column(String, nullable=True)
+    direccion = Column(String, nullable=True)
+    estado = Column(String, default="En curso")  # En curso, Pausada, Terminada
+    fecha_inicio = Column(String, nullable=True)
+    notas = Column(Text, nullable=True)
+    creado_en = Column(DateTime, default=utcnow)
+
+class GestionObraItem(Base):
+    __tablename__ = "gestion_obra_items"
+    id = Column(Integer, primary_key=True, index=True)
+    obra_id = Column(Integer, ForeignKey("gestion_obras.id"))
+    descripcion = Column(String)
+    gremio = Column(String, nullable=True)
+    completado = Column(Boolean, default=False)
+
+class GestionObraAsignacion(Base):
+    __tablename__ = "gestion_obra_asignaciones"
+    id = Column(Integer, primary_key=True, index=True)
+    obra_id = Column(Integer, ForeignKey("gestion_obras.id"))
+    empleado_id = Column(Integer, ForeignKey("gestion_empleados.id"))
+    fecha = Column(String, nullable=True)
+    notas = Column(String, nullable=True)
+
+class GestionPresupuesto(Base):
+    __tablename__ = "gestion_presupuestos"
+    id = Column(Integer, primary_key=True, index=True)
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    cliente_nombre = Column(String)
+    nombre = Column(String)
+    estado = Column(String, default="Borrador")  # Borrador, Enviado, Aceptado, Rechazado
+    fecha = Column(String)
+    notas = Column(Text, nullable=True)
+    iva = Column(Boolean, default=False)
+    creado_en = Column(DateTime, default=utcnow)
+
+class GestionPresupuestoLinea(Base):
+    __tablename__ = "gestion_presupuesto_lineas"
+    id = Column(Integer, primary_key=True, index=True)
+    presupuesto_id = Column(Integer, ForeignKey("gestion_presupuestos.id"))
+    concepto = Column(String)
+    gremio = Column(String, nullable=True)
+    cantidad = Column(Float, default=1)
+    unidad = Column(String, default="ud")
+    precio_unitario = Column(Float)
+
+class GestionEmpleado(Base):
+    __tablename__ = "gestion_empleados"
+    id = Column(Integer, primary_key=True, index=True)
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    nombre = Column(String)
+    telefono = Column(String, nullable=True)
+    tipo_pago = Column(String, default="hora")  # hora, dia, fijo
+    tarifa = Column(Float, default=0)
+    creado_en = Column(DateTime, default=utcnow)
+
+class GestionJornada(Base):
+    __tablename__ = "gestion_jornadas"
+    id = Column(Integer, primary_key=True, index=True)
+    empleado_id = Column(Integer, ForeignKey("gestion_empleados.id"))
+    fecha = Column(String)
+    pagado = Column(Boolean, default=False)
+
+class GestionPagoEmpleado(Base):
+    __tablename__ = "gestion_pagos_empleado"
+    id = Column(Integer, primary_key=True, index=True)
+    empleado_id = Column(Integer, ForeignKey("gestion_empleados.id"))
+    fecha = Column(String)
+    importe = Column(Float)
+    concepto = Column(String, nullable=True)

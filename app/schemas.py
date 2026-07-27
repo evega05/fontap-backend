@@ -535,6 +535,260 @@ class DocumentoRespuesta(BaseModel):
     class Config:
         from_attributes = True
 
+class GestionClienteCrear(BaseModel):
+    nombre: str
+    telefono: Optional[str] = None
+    direccion: Optional[str] = None
+    frecuencia: Optional[float] = None
+    notas: Optional[str] = None
+
+class GestionClienteActualizar(BaseModel):
+    nombre: Optional[str] = None
+    telefono: Optional[str] = None
+    direccion: Optional[str] = None
+    frecuencia: Optional[float] = None
+    notas: Optional[str] = None
+
+class GestionClienteRespuesta(BaseModel):
+    id: int
+    fontanero_id: int
+    nombre: str
+    telefono: Optional[str] = None
+    direccion: Optional[str] = None
+    frecuencia: Optional[float] = None
+    notas: Optional[str] = None
+    creado_en: datetime.datetime
+    ultima_visita: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class GestionLeadCrear(BaseModel):
+    nombre: str
+    telefono: Optional[str] = None
+    gremio: Optional[str] = None
+    mensaje: Optional[str] = None
+
+class GestionLeadActualizar(BaseModel):
+    estado: Literal["nuevo", "contactado", "convertido", "descartado"]
+
+class GestionLeadRespuesta(BaseModel):
+    id: int
+    fontanero_id: int
+    nombre: str
+    telefono: Optional[str] = None
+    gremio: Optional[str] = None
+    mensaje: Optional[str] = None
+    estado: str
+    creado_en: datetime.datetime
+    class Config:
+        from_attributes = True
+
+class GestionVisitaCrear(BaseModel):
+    cliente_nombre: str
+    fecha: str
+    hora: Optional[str] = None
+    tipo: Optional[str] = None
+    direccion: Optional[str] = None
+    notas: Optional[str] = None
+
+class GestionVisitaRespuesta(BaseModel):
+    id: int
+    fontanero_id: int
+    cliente_id: int
+    fecha: str
+    hora: Optional[str] = None
+    tipo: Optional[str] = None
+    direccion: Optional[str] = None
+    notas: Optional[str] = None
+    estado: str
+    cliente_nombre: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class GestionCobroCrear(BaseModel):
+    cliente_nombre: str
+    fecha: str
+    hora: Optional[str] = None
+    importe: float
+    metodo: str = "Efectivo"
+
+class GestionCobroRespuesta(BaseModel):
+    id: int
+    fontanero_id: int
+    cliente_id: int
+    fecha: str
+    hora: Optional[str] = None
+    importe: float
+    metodo: str
+    estado: str
+    cliente_nombre: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class GestionTareaCrear(BaseModel):
+    descripcion: str
+    fecha: str
+
+class GestionTareaRespuesta(BaseModel):
+    id: int
+    fontanero_id: int
+    descripcion: str
+    fecha: str
+    completada: bool
+    class Config:
+        from_attributes = True
+
+class GestionObraCrear(BaseModel):
+    nombre: str
+    cliente_nombre: Optional[str] = None
+    direccion: Optional[str] = None
+    estado: str = "En curso"
+    fecha_inicio: Optional[str] = None
+    notas: Optional[str] = None
+
+class GestionObraActualizar(BaseModel):
+    nombre: Optional[str] = None
+    cliente_nombre: Optional[str] = None
+    direccion: Optional[str] = None
+    estado: Optional[Literal["En curso", "Pausada", "Terminada"]] = None
+    fecha_inicio: Optional[str] = None
+    notas: Optional[str] = None
+
+class GestionObraItemCrear(BaseModel):
+    descripcion: str
+    gremio: Optional[str] = None
+
+class GestionObraItemRespuesta(BaseModel):
+    id: int
+    obra_id: int
+    descripcion: str
+    gremio: Optional[str] = None
+    completado: bool
+    class Config:
+        from_attributes = True
+
+class GestionObraAsignacionCrear(BaseModel):
+    empleado_id: int
+    fecha: Optional[str] = None
+    notas: Optional[str] = None
+
+class GestionObraAsignacionRespuesta(BaseModel):
+    id: int
+    obra_id: int
+    empleado_id: int
+    fecha: Optional[str] = None
+    notas: Optional[str] = None
+    empleado_nombre: Optional[str] = None
+    empleado_telefono: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class GestionObraRespuesta(BaseModel):
+    id: int
+    fontanero_id: int
+    nombre: str
+    cliente_nombre: Optional[str] = None
+    direccion: Optional[str] = None
+    estado: str
+    fecha_inicio: Optional[str] = None
+    notas: Optional[str] = None
+    creado_en: datetime.datetime
+    items: List[GestionObraItemRespuesta] = []
+    asignaciones: List[GestionObraAsignacionRespuesta] = []
+    class Config:
+        from_attributes = True
+
+class GestionPresupuestoLineaCrear(BaseModel):
+    concepto: str
+    gremio: Optional[str] = None
+    cantidad: float = 1
+    unidad: str = "ud"
+    precio_unitario: float
+
+class GestionPresupuestoLineaRespuesta(BaseModel):
+    id: int
+    presupuesto_id: int
+    concepto: str
+    gremio: Optional[str] = None
+    cantidad: float
+    unidad: str
+    precio_unitario: float
+    class Config:
+        from_attributes = True
+
+class GestionPresupuestoCrear(BaseModel):
+    nombre: str
+    cliente_nombre: str
+    estado: str = "Borrador"
+    fecha: str
+    notas: Optional[str] = None
+    iva: bool = False
+    lineas: List[GestionPresupuestoLineaCrear] = []
+
+class GestionPresupuestoActualizar(BaseModel):
+    nombre: Optional[str] = None
+    estado: Optional[Literal["Borrador", "Enviado", "Aceptado", "Rechazado"]] = None
+    fecha: Optional[str] = None
+    notas: Optional[str] = None
+    iva: Optional[bool] = None
+
+class GestionPresupuestoRespuesta(BaseModel):
+    id: int
+    fontanero_id: int
+    cliente_nombre: str
+    nombre: str
+    estado: str
+    fecha: str
+    notas: Optional[str] = None
+    iva: bool
+    creado_en: datetime.datetime
+    lineas: List[GestionPresupuestoLineaRespuesta] = []
+    subtotal: float = 0
+    total: float = 0
+    class Config:
+        from_attributes = True
+
+class GestionEmpleadoCrear(BaseModel):
+    nombre: str
+    telefono: Optional[str] = None
+    tipo_pago: Literal["hora", "dia", "fijo"] = "hora"
+    tarifa: float = 0
+
+class GestionEmpleadoRespuesta(BaseModel):
+    id: int
+    fontanero_id: int
+    nombre: str
+    telefono: Optional[str] = None
+    tipo_pago: str
+    tarifa: float
+    creado_en: datetime.datetime
+    dias_pendientes: int = 0
+    pagado_este_mes: float = 0
+    class Config:
+        from_attributes = True
+
+class GestionPagoEmpleadoCrear(BaseModel):
+    fecha: str
+    importe: float
+    concepto: Optional[str] = None
+
+class GestionPagoEmpleadoRespuesta(BaseModel):
+    id: int
+    empleado_id: int
+    fecha: str
+    importe: float
+    concepto: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class GestionJornadaRespuesta(BaseModel):
+    id: int
+    empleado_id: int
+    fecha: str
+    pagado: bool
+    class Config:
+        from_attributes = True
+
 class AdminStats(BaseModel):
     total_usuarios: int
     total_fontaneros: int
