@@ -2891,6 +2891,32 @@ def subir_foto_perfil(
     db.commit()
     return {"foto_url": fontanero.foto_url}
 
+@app.post("/fontaneros/{fontanero_id}/logo-empresa")
+def subir_logo_empresa(
+    fontanero_id: int,
+    archivo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _verificar_fontanero_propio(current_user, fontanero_id)
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    if not fontanero.nombre_empresa:
+        raise HTTPException(status_code=400, detail="Primero ponle un nombre a tu empresa")
+    if archivo.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
+    ext = _extension_segura(archivo.content_type, "jpg")
+    nombre_archivo = f"logo_{uuid.uuid4().hex}.{ext}"
+    ruta = os.path.join(UPLOAD_DIR, nombre_archivo)
+    with open(ruta, "wb") as f:
+        f.write(_leer_archivo_limitado(archivo))
+    fontanero.logo_empresa_url = f"/uploads/{nombre_archivo}"
+    db.commit()
+    return {"logo_empresa_url": fontanero.logo_empresa_url}
+
 @app.get("/fontaneros/{fontanero_id}/perfil", response_model=schemas.FontaneroRespuesta)
 def ver_perfil_fontanero(
     fontanero_id: int,
@@ -2909,13 +2935,23 @@ def ver_perfil_fontanero(
         item.codigo_referido = None
     usuario = db.query(models.Usuario).filter(models.Usuario.id == fontanero_id).first()
     item.miembro_desde = usuario.creado_en if usuario else None
+    dueño_equipo = None
     if fontanero.nombre_empresa:
         item.empresa_nombre = fontanero.nombre_empresa
+        dueño_equipo = fontanero
     elif fontanero.empresa_id:
         dueño = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero.empresa_id).first()
         if dueño:
             item.empresa_nombre = dueño.nombre_empresa
             item.logo_empresa_url = dueño.logo_empresa_url
+            dueño_equipo = dueño
+    if dueño_equipo:
+        miembros = [dueño_equipo] + db.query(models.Fontanero).filter(models.Fontanero.empresa_id == dueño_equipo.id).all()
+        item.equipo_num_miembros = len(miembros)
+        item.equipo_num_trabajos = sum(m.num_trabajos or 0 for m in miembros)
+        valoraciones = [m.valoracion for m in miembros if m.valoracion is not None]
+        if valoraciones:
+            item.equipo_valoracion_media = round(sum(valoraciones) / len(valoraciones), 2)
     return item
 
 @app.get("/fontaneros/{fontanero_id}/checklist-perfil")
@@ -4035,14 +4071,28 @@ def ver_resenas(fontanero_id: int, db: Session = Depends(get_db)):
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
-    resenas = db.query(models.Resena).filter(
-        models.Resena.fontanero_id == fontanero.id
-    ).order_by(models.Resena.creado_en.desc()).all()
+    # Si es una empresa (o un empleado suyo), las reseñas se muestran agregadas
+    # de todo el equipo, no solo de la persona concreta que se está consultando.
+    dueño_equipo = fontanero if fontanero.nombre_empresa else (
+        db.query(models.Fontanero).filter(models.Fontanero.id == fontanero.empresa_id).first()
+        if fontanero.empresa_id else None
+    )
+    if dueño_equipo:
+        ids_equipo = [dueño_equipo.id] + [
+            m.id for m in db.query(models.Fontanero).filter(models.Fontanero.empresa_id == dueño_equipo.id).all()
+        ]
+        filtro_fontanero = models.Resena.fontanero_id.in_(ids_equipo)
+    else:
+        filtro_fontanero = models.Resena.fontanero_id == fontanero.id
+    resenas = db.query(models.Resena).filter(filtro_fontanero).order_by(models.Resena.creado_en.desc()).all()
     resultado = []
     for r in resenas:
         item = schemas.ResenaRespuesta.model_validate(r, from_attributes=True)
         cliente = db.query(models.Usuario).filter(models.Usuario.id == r.cliente_id).first()
         item.cliente_nombre = cliente.nombre if cliente else "Cliente"
+        if dueño_equipo:
+            autor = db.query(models.Fontanero).filter(models.Fontanero.id == r.fontanero_id).first()
+            item.fontanero_nombre = autor.nombre if autor else None
         resultado.append(item)
     return resultado
 

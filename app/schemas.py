@@ -72,6 +72,9 @@ class FontaneroRespuesta(BaseModel):
     empresa_id: Optional[int] = None
     empresa_nombre: Optional[str] = None
     logo_empresa_url: Optional[str] = None
+    equipo_valoracion_media: Optional[float] = None
+    equipo_num_trabajos: int = 0
+    equipo_num_miembros: int = 0
     class Config:
         from_attributes = True
 
@@ -427,6 +430,7 @@ class ResenaRespuesta(BaseModel):
     comentario: Optional[str] = None
     creado_en: datetime.datetime
     cliente_nombre: Optional[str] = None
+    fontanero_nombre: Optional[str] = None
 
 class ResenaClienteCrear(BaseModel):
     puntualidad: float
