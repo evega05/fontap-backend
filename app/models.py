@@ -254,7 +254,6 @@ class Inmueble(Base):
     nombre = Column(String)
     direccion = Column(String)
     ciudad = Column(String, default="Bilbao")
-    num_viviendas = Column(Integer, nullable=True)  # para repartir el coste del mantenimiento entre pisos
     creado_en = Column(DateTime, default=utcnow)
 
 class ServicioRecurrente(Base):
@@ -268,7 +267,6 @@ class ServicioRecurrente(Base):
     frecuencia = Column(String)  # semanal, quincenal, mensual
     proxima_ejecucion = Column(DateTime)
     activo = Column(Boolean, default=True)
-    inmueble_id = Column(Integer, ForeignKey("inmuebles.id"), nullable=True)  # mantenimiento de zona común
     creado_en = Column(DateTime, default=utcnow)
 
 class Proyecto(Base):

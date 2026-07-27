@@ -110,12 +110,6 @@ def _migrar_columnas_faltantes():
         "mensajes": {
             "imagen_url": "VARCHAR",
         },
-        "inmuebles": {
-            "num_viviendas": "INTEGER",
-        },
-        "servicios_recurrentes": {
-            "inmueble_id": "INTEGER",
-        },
     }
     with engine.begin() as conn:
         for tabla, columnas_nuevas in por_tabla.items():
@@ -1725,13 +1719,6 @@ def crear_servicio_recurrente(
 ):
     if datos.gremio not in GREMIOS_VALIDOS:
         raise HTTPException(status_code=422, detail="Gremio no válido")
-    if datos.inmueble_id is not None:
-        inmueble = db.query(models.Inmueble).filter(
-            models.Inmueble.id == datos.inmueble_id,
-            models.Inmueble.administrador_id == current_user["id"],
-        ).first()
-        if not inmueble:
-            raise HTTPException(status_code=404, detail="Inmueble no encontrado")
     plantilla = models.ServicioRecurrente(
         cliente_id=current_user["id"],
         fontanero_id=datos.fontanero_id,
@@ -1740,31 +1727,20 @@ def crear_servicio_recurrente(
         descripcion=datos.descripcion,
         frecuencia=datos.frecuencia,
         proxima_ejecucion=datos.proxima_ejecucion,
-        inmueble_id=datos.inmueble_id,
     )
     db.add(plantilla)
     db.commit()
     db.refresh(plantilla)
-    return _enriquecer_servicio_recurrente(db, plantilla)
-
-def _enriquecer_servicio_recurrente(db: Session, plantilla: models.ServicioRecurrente) -> schemas.ServicioRecurrenteRespuesta:
-    data = schemas.ServicioRecurrenteRespuesta.model_validate(plantilla)
-    if plantilla.inmueble_id:
-        inmueble = db.query(models.Inmueble).filter(models.Inmueble.id == plantilla.inmueble_id).first()
-        if inmueble:
-            data.inmueble_nombre = inmueble.nombre
-            data.inmueble_num_viviendas = inmueble.num_viviendas
-    return data
+    return plantilla
 
 @app.get("/servicios-recurrentes", response_model=List[schemas.ServicioRecurrenteRespuesta])
 def listar_servicios_recurrentes(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
-    plantillas = db.query(models.ServicioRecurrente).filter(
+    return db.query(models.ServicioRecurrente).filter(
         models.ServicioRecurrente.cliente_id == current_user["id"]
     ).order_by(models.ServicioRecurrente.id.desc()).all()
-    return [_enriquecer_servicio_recurrente(db, p) for p in plantillas]
 
 @app.put("/servicios-recurrentes/{recurrente_id}", response_model=schemas.ServicioRecurrenteRespuesta)
 def actualizar_servicio_recurrente(
@@ -4846,7 +4822,6 @@ def crear_inmueble(
         nombre=datos.nombre,
         direccion=datos.direccion,
         ciudad=datos.ciudad,
-        num_viviendas=datos.num_viviendas,
     )
     db.add(inmueble)
     db.commit()
@@ -5489,19 +5464,9 @@ def _bucle_servicios_recurrentes():
                 models.ServicioRecurrente.proxima_ejecucion <= ahora,
             ).all()
             for plantilla in pendientes:
-                descripcion = plantilla.descripcion
-                ciudad = None
-                if plantilla.inmueble_id:
-                    inmueble = db.query(models.Inmueble).filter(models.Inmueble.id == plantilla.inmueble_id).first()
-                    if inmueble:
-                        ciudad = inmueble.ciudad
-                        nota = f"Zona común de {inmueble.nombre} ({inmueble.direccion})"
-                        if inmueble.num_viviendas:
-                            nota += f" · coste a repartir entre {inmueble.num_viviendas} viviendas"
-                        descripcion = f"{nota}. {descripcion}" if descripcion else nota
                 _crear_servicio_interno(
-                    db, plantilla.cliente_id, plantilla.tipo, descripcion,
-                    False, None, plantilla.fontanero_id, plantilla.gremio, ciudad,
+                    db, plantilla.cliente_id, plantilla.tipo, plantilla.descripcion,
+                    False, None, plantilla.fontanero_id, plantilla.gremio,
                 )
                 dias = FRECUENCIA_A_DIAS.get(plantilla.frecuencia, 30)
                 plantilla.proxima_ejecucion = plantilla.proxima_ejecucion + datetime.timedelta(days=dias)
