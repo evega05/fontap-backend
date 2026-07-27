@@ -301,6 +301,8 @@ class OfertaEmpleo(Base):
     titulo = Column(String)
     descripcion = Column(Text, nullable=True)
     zona = Column(String, nullable=True)
+    tipo_pago = Column(String, default="servicio")  # servicio (precio cerrado) u hora (tarifa/h)
+    tarifa = Column(Float, nullable=True)
     activa = Column(Boolean, default=True)
     creado_en = Column(DateTime, default=utcnow)
 
@@ -362,6 +364,8 @@ class FichaCliente(Base):
     direccion = Column(String, nullable=True)
     frecuencia = Column(Float, nullable=True)  # visitas estimadas por semana
     notas = Column(Text, nullable=True)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=True)  # si viene de una contratación real (no dado de alta a mano)
+    servicio_id = Column(Integer, ForeignKey("servicios.id"), nullable=True)  # último servicio real, para abrir el chat
     creado_en = Column(DateTime, default=utcnow)
 
 class GestionLead(Base):

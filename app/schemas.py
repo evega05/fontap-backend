@@ -488,6 +488,8 @@ class OfertaEmpleoCrear(BaseModel):
     titulo: str
     descripcion: Optional[str] = None
     zona: Optional[str] = None
+    tipo_pago: Optional[str] = "servicio"  # servicio (precio cerrado) u hora
+    tarifa: Optional[float] = None
 
 class OfertaEmpleoActualizar(BaseModel):
     activa: Optional[bool] = None
@@ -499,6 +501,8 @@ class OfertaEmpleoRespuesta(BaseModel):
     titulo: str
     descripcion: Optional[str] = None
     zona: Optional[str] = None
+    tipo_pago: str = "servicio"
+    tarifa: Optional[float] = None
     activa: bool
     creado_en: datetime.datetime
     fontanero_nombre: Optional[str] = None
@@ -559,6 +563,8 @@ class GestionClienteRespuesta(BaseModel):
     notas: Optional[str] = None
     creado_en: datetime.datetime
     ultima_visita: Optional[str] = None
+    usuario_id: Optional[int] = None
+    servicio_id: Optional[int] = None
     class Config:
         from_attributes = True
 

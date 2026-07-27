@@ -115,6 +115,14 @@ def _migrar_columnas_faltantes():
         "mensajes": {
             "imagen_url": "VARCHAR",
         },
+        "ofertas_empleo": {
+            "tipo_pago": "VARCHAR DEFAULT 'servicio'",
+            "tarifa": "FLOAT",
+        },
+        "gestion_clientes": {
+            "usuario_id": "INTEGER",
+            "servicio_id": "INTEGER",
+        },
     }
     with engine.begin() as conn:
         for tabla, columnas_nuevas in por_tabla.items():
@@ -1641,6 +1649,8 @@ def _crear_servicio_interno(db: Session, cliente_id: int, tipo: str, descripcion
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
+    if fontanero_directo:
+        _vincular_cliente_gestion(db, nuevo, fontanero_directo)
     if fontanero_directo and not es_consulta:
         _crear_notificacion(db, fontanero_directo.usuario_id, "Nueva solicitud", f"Tienes una nueva solicitud de {tipo}", "solicitud_directa", nuevo.id)
         db.commit()
@@ -1959,6 +1969,8 @@ def crear_oferta_empleo(
         titulo=datos.titulo,
         descripcion=datos.descripcion,
         zona=datos.zona or fontanero.zona,
+        tipo_pago=datos.tipo_pago or "servicio",
+        tarifa=datos.tarifa,
     )
     db.add(oferta)
     db.commit()
@@ -2142,6 +2154,7 @@ def aceptar_servicio(
         raise HTTPException(status_code=400, detail="Este servicio ya fue asignado a otro profesional")
     db.commit()
     db.refresh(servicio)
+    _vincular_cliente_gestion(db, servicio, fontanero)
     _crear_notificacion(db, servicio.cliente_id, "Servicio aceptado", f"Un fontanero ha aceptado tu solicitud de {servicio.tipo}", "servicio_aceptado", servicio.id)
     db.commit()
     _google_calendar_sync(db, servicio)
@@ -5436,7 +5449,8 @@ def _verificar_participante_servicio(db: Session, servicio_id: int, current_user
         models.Fontanero.usuario_id == current_user["id"]
     ).first()
     es_fontanero = bool(fontanero_actual) and servicio.fontanero_id == fontanero_actual.id
-    if not es_cliente and not es_fontanero:
+    es_dueño_empresa = bool(fontanero_actual) and servicio.empresa_id == fontanero_actual.id
+    if not es_cliente and not es_fontanero and not es_dueño_empresa:
         raise HTTPException(status_code=403, detail="No participas en este servicio")
     return servicio
 
@@ -5684,6 +5698,33 @@ def _gestion_buscar_o_crear_cliente(db: Session, fontanero_id: int, nombre: str)
     db.commit()
     db.refresh(nuevo)
     return nuevo
+
+def _vincular_cliente_gestion(db: Session, servicio, fontanero_directo) -> None:
+    """Cuando un cliente contrata directamente a un profesional (o se le asigna una
+    solicitud abierta), lo da de alta automáticamente en el Panel de Gestión de quien
+    corresponde: el dueño de la empresa si es un empleado, o el propio profesional si
+    trabaja solo. Así aparece junto al resto de su cartera y se puede abrir el chat
+    desde ahí. Si además es un empleado con empresa, el dueño también podrá chatear."""
+    if not fontanero_directo:
+        return
+    dueño_id = fontanero_directo.empresa_id or fontanero_directo.id
+    cliente = db.query(models.Usuario).filter(models.Usuario.id == servicio.cliente_id).first()
+    if not cliente:
+        return
+    ficha = db.query(models.FichaCliente).filter(
+        models.FichaCliente.fontanero_id == dueño_id,
+        models.FichaCliente.usuario_id == cliente.id,
+    ).first()
+    if ficha:
+        ficha.servicio_id = servicio.id
+    else:
+        db.add(models.FichaCliente(
+            fontanero_id=dueño_id, nombre=cliente.nombre, telefono=cliente.telefono,
+            usuario_id=cliente.id, servicio_id=servicio.id,
+        ))
+    if fontanero_directo.empresa_id:
+        servicio.empresa_id = servicio.empresa_id or dueño_id
+    db.commit()
 
 # ─── Clientes ───────────────────────────────────────────────────────────────
 
