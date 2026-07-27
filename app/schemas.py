@@ -334,6 +334,7 @@ class ServicioRecurrenteCrear(BaseModel):
     frecuencia: Literal["semanal", "quincenal", "mensual"]
     fontanero_id: Optional[int] = None
     proxima_ejecucion: datetime.datetime
+    inmueble_id: Optional[int] = None
 
 class ServicioRecurrenteActualizar(BaseModel):
     activo: Optional[bool] = None
@@ -350,6 +351,9 @@ class ServicioRecurrenteRespuesta(BaseModel):
     proxima_ejecucion: datetime.datetime
     activo: bool
     creado_en: datetime.datetime
+    inmueble_id: Optional[int] = None
+    inmueble_nombre: Optional[str] = None
+    inmueble_num_viviendas: Optional[int] = None
     class Config:
         from_attributes = True
 
@@ -450,6 +454,7 @@ class InmuebleCrear(BaseModel):
     nombre: str
     direccion: str
     ciudad: str = "Bilbao"
+    num_viviendas: Optional[int] = None
 
 class InmuebleRespuesta(BaseModel):
     id: int
@@ -457,6 +462,7 @@ class InmuebleRespuesta(BaseModel):
     nombre: str
     direccion: str
     ciudad: str
+    num_viviendas: Optional[int] = None
     creado_en: datetime.datetime
     class Config:
         from_attributes = True
