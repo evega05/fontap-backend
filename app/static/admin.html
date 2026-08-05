@@ -168,7 +168,7 @@
     </div>
     <div class="tabla-wrap">
       <table>
-        <thead><tr><th>Profesional</th><th>Gremio</th><th>Verificado</th><th>Provenza Pro</th><th>Stripe</th><th>Comisión pendiente</th><th>Valoración</th><th>Estado</th><th></th></tr></thead>
+        <thead><tr><th>Profesional</th><th>Gremio</th><th>Verificado</th><th>Provenza Pro</th><th>Comisión pendiente</th><th>Valoración</th><th>Estado</th><th></th></tr></thead>
         <tbody id="f-tbody"><tr><td colspan="9" class="vacio">Cargando…</td></tr></tbody>
       </table>
     </div>
@@ -379,7 +379,6 @@ function renderProfesionales() {
     const pro = f.certificado_pro
       ? `<span class="pill good">🏅 Pro</span> <button class="btn small" onclick="certificarPro(${f.id}, false)">Quitar</button>`
       : `<button class="btn small primary" onclick="certificarPro(${f.id}, true)">Certificar Pro</button>`;
-    const stripe = f.stripe_conectado ? '<span class="pill good">✓ Conectado</span>' : '<span class="pill neutro">— No</span>';
     const comision = f.comision_pendiente > 0
       ? `<span class="pill warn">⏳ ${EUR.format(f.comision_pendiente)}</span> <button class="btn small primary" onclick="marcarComisionPagada(${f.id}, '${h(f.nombre).replace(/'/g, "\\'")}')">Marcar pagada</button>`
       : '<span class="pill neutro">0 €</span>';
@@ -390,7 +389,7 @@ function renderProfesionales() {
       : `<button class="btn small danger" onclick="vetar(${f.usuario_id}, true)">Vetar</button>`) : '';
     const botonEditar = `<button class="btn small" onclick="abrirEditarFontanero(${f.id})">Editar</button>`;
     const botonEliminar = f.usuario_id ? `<button class="btn small danger" onclick="eliminarUsuario(${f.usuario_id}, '${h(f.nombre).replace(/'/g, "\\'")}')">Eliminar</button>` : '';
-    return `<tr><td>${h(f.nombre)}<div class="sub">${h(f.email || '')}</div></td><td>${h(f.gremio)}</td><td>${verif}</td><td>${pro}</td><td>${stripe}</td><td>${comision}</td><td>${f.valoracion ? '★ ' + f.valoracion : '—'}</td><td>${estado}</td><td style="display:flex;gap:6px">${botonEditar}${botonVeto}${botonEliminar}</td></tr>`;
+    return `<tr><td>${h(f.nombre)}<div class="sub">${h(f.email || '')}</div></td><td>${h(f.gremio)}</td><td>${verif}</td><td>${pro}</td><td>${comision}</td><td>${f.valoracion ? '★ ' + f.valoracion : '—'}</td><td>${estado}</td><td style="display:flex;gap:6px">${botonEditar}${botonVeto}${botonEliminar}</td></tr>`;
   }).join('');
 }
 

@@ -679,8 +679,9 @@ def pagina_privacidad():
         {"titulo": "2. Qué datos recogemos", "texto":
             "Nombre, email y teléfono al registrarte; ubicación aproximada mientras usas el mapa o solicitas un servicio "
             "urgente; fotos que subas al chat, a tu perfil o como evidencia de un trabajo; documento de identidad (DNI/NIE) "
-            "de los profesionales, solo para verificar su identidad; historial de servicios, mensajes de chat y valoraciones; "
-            "y datos de pago procesados directamente por Stripe (no almacenamos números de tarjeta en nuestros servidores)."},
+            "de los profesionales, solo para verificar su identidad; historial de servicios, mensajes de chat, valoraciones "
+            "e importes de los pagos declarados (el pago en sí se acuerda entre cliente y profesional fuera de la app, en "
+            "efectivo o Bizum; no almacenamos datos de tarjetas ni procesamos pagos con tarjeta)."},
         {"titulo": "3. Para qué los usamos y con qué base legal", "texto":
             "Para prestar el servicio de intermediación (ejecución del contrato): mostrar tu solicitud a profesionales "
             "cercanos, gestionar pagos, permitir el chat y los recordatorios de cita. Para verificar la identidad de los "
@@ -688,9 +689,9 @@ def pagina_privacidad():
             "contrato) y, si lo autorizas, sincronizar tu calendario de Google (consentimiento)."},
         {"titulo": "4. Con quién compartimos datos", "texto":
             "Con la otra parte de un servicio (cliente/profesional), lo mínimo necesario para completarlo. Con proveedores "
-            "que tratan datos en nuestro nombre: Stripe (pagos), Google (inicio de sesión, Google Calendar y mapas), y "
-            "nuestro proveedor de hosting para la base de datos y los archivos subidos. No vendemos tus datos a terceros "
-            "con fines publicitarios."},
+            "que tratan datos en nuestro nombre: Google (inicio de sesión, Google Calendar y mapas), nuestro proveedor de "
+            "email transaccional, y nuestro proveedor de hosting para la base de datos y los archivos subidos. No vendemos "
+            "tus datos a terceros con fines publicitarios."},
         {"titulo": "5. Documentos de identidad de profesionales", "texto":
             "Las fotos de DNI/NIE que suben los profesionales para verificarse se usan exclusivamente para que el equipo "
             "de Multiservicios Provenza confirme su identidad, con acceso restringido al panel de administración, y no se "
@@ -764,12 +765,6 @@ def _estado_dependencias(db: Session):
         "Correo (verificación, recuperación de contraseña)",
         correo_configurado,
         "Configurado (Brevo)" if (BREVO_API_KEY and BREVO_FROM_EMAIL) else ("Configurado (SMTP)" if SMTP_HOST else "Sin configurar (los códigos se muestran solo en los logs)"),
-    ))
-
-    dependencias.append((
-        "Pagos (Stripe)",
-        bool(STRIPE_SECRET_KEY),
-        "Configurado" if STRIPE_SECRET_KEY else "Sin configurar (pago con Stripe no disponible)",
     ))
 
     google_ok = bool(GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
@@ -2296,11 +2291,9 @@ def confirmar_pago(
 ):
     # Este endpoint SOLO registra la intención de pago para efectivo/bizum (que
     # quedan "pendientes" hasta que el fontanero confirme haberlos recibido, ver
-    # /confirmar_efectivo y /confirmar_bizum). El pago con tarjeta NUNCA debe pasar
-    # por aquí: se marca "pagado" únicamente en /stripe/verificar, que comprueba
-    # de verdad contra Stripe que el cargo se hizo. Restringir
-    # `metodo` con Literal evita que cualquier otro valor salte directo a "pagado"
-    # sin haber pagado nada.
+    # /confirmar_efectivo y /confirmar_bizum). No hay pago con tarjeta: el dinero
+    # del servicio nunca pasa por la app. Restringir `metodo` con Literal evita
+    # que cualquier otro valor salte directo a "pagado" sin haber pagado nada.
     servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
     if not servicio:
         raise HTTPException(status_code=404, detail="Servicio no encontrado")
@@ -4576,203 +4569,11 @@ def descargar_factura(
     buf.seek(0)
     return Response(content=buf.read(), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename=factura_{servicio_id}.pdf"})
 
-# ─── STRIPE ───────────────────────────────────────────────────────────────────
-
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
-
-@app.post("/servicios/{servicio_id}/stripe/crear-checkout")
-def crear_stripe_checkout(
-    servicio_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(auth.get_current_user),
-):
-    """Pago real vía la página alojada de Stripe (Checkout): no requiere SDK nativo,
-    así que funciona con Expo Go — el navegador se abre con expo-web-browser."""
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(status_code=501, detail="Stripe no configurado. Añade STRIPE_SECRET_KEY en variables de entorno.")
-    try:
-        import stripe
-        stripe.api_key = STRIPE_SECRET_KEY
-    except ImportError:
-        raise HTTPException(status_code=501, detail="Librería stripe no instalada.")
-
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio or not servicio.precio:
-        raise HTTPException(status_code=400, detail="Servicio no encontrado o sin precio")
-    if servicio.cliente_id != current_user["id"]:
-        raise HTTPException(status_code=403, detail="Solo el cliente puede pagar este servicio")
-    if servicio.estado == "pagado":
-        raise HTTPException(status_code=400, detail="Este servicio ya está pagado")
-    if servicio.estado != "completado":
-        raise HTTPException(status_code=400, detail="El profesional aún no ha marcado el trabajo como terminado")
-
-    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
-
-    # El pago con tarjeta reparte el dinero automáticamente al profesional (menos la
-    # comisión) vía Stripe Connect. Si no tiene cuenta conectada y activa, el dinero
-    # se quedaría en la cuenta de Multiservicios Provenza sin ninguna forma automática
-    # de llegarle, así que no se permite cobrar por tarjeta hasta que la conecte.
-    if not fontanero_obj or not fontanero_obj.stripe_account_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Este profesional todavía no ha conectado su cuenta de cobro. Pídele que pulse \"Conectar\" en su panel, o paga en efectivo/Bizum mientras tanto.",
-        )
-    cuenta_stripe = stripe.Account.retrieve(fontanero_obj.stripe_account_id)
-    if not cuenta_stripe.charges_enabled:
-        raise HTTPException(
-            status_code=400,
-            detail="Este profesional está terminando de configurar su cuenta de cobro. Prueba de nuevo en unos minutos, o paga en efectivo/Bizum mientras tanto.",
-        )
-
-    comision_centavos = round(servicio.precio * 100 * _tasa_comision(fontanero_obj))
-
-    checkout_kwargs = dict(
-        mode="payment",
-        automatic_payment_methods={"enabled": True},
-        line_items=[{
-            "price_data": {
-                "currency": "eur",
-                "product_data": {"name": f"Multiservicios Provenza — {servicio.tipo}"},
-                "unit_amount": int(servicio.precio * 100),
-            },
-            "quantity": 1,
-        }],
-        metadata={"servicio_id": str(servicio_id)},
-        success_url=f"{os.getenv('BACKEND_URL', 'https://fontap-backend-production.up.railway.app')}/pago-resultado?estado=ok",
-        cancel_url=f"{os.getenv('BACKEND_URL', 'https://fontap-backend-production.up.railway.app')}/pago-resultado?estado=cancelado",
-        payment_intent_data={
-            "application_fee_amount": comision_centavos,
-            "transfer_data": {"destination": fontanero_obj.stripe_account_id},
-        },
-    )
-    try:
-        session = stripe.checkout.Session.create(**checkout_kwargs)
-    except Exception:
-        raise HTTPException(status_code=400, detail="No se pudo iniciar el pago con tarjeta. Inténtalo de nuevo.")
-    servicio.stripe_payment_intent = session.id
-    db.commit()
-    return {"checkout_url": session.url, "session_id": session.id}
-
-@app.post("/servicios/{servicio_id}/stripe/verificar")
-def verificar_stripe_checkout(
-    servicio_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(auth.get_current_user),
-):
-    """El frontend llama esto al volver del navegador de pago; verificamos directo
-    con Stripe (nunca confiamos en que el cliente 'diga' que pagó)."""
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(status_code=501, detail="Stripe no configurado.")
-    import stripe
-    stripe.api_key = STRIPE_SECRET_KEY
-
-    servicio = db.query(models.Servicio).filter(models.Servicio.id == servicio_id).first()
-    if not servicio or not servicio.stripe_payment_intent:
-        raise HTTPException(status_code=400, detail="No hay sesión de pago para este servicio")
-    es_cliente = servicio.cliente_id == current_user["id"]
-    fontanero_actual = db.query(models.Fontanero).filter(
-        models.Fontanero.usuario_id == current_user["id"]
-    ).first()
-    es_fontanero = bool(fontanero_actual) and servicio.fontanero_id == fontanero_actual.id
-    if not es_cliente and not es_fontanero:
-        raise HTTPException(status_code=403, detail="No puedes verificar el pago de un servicio que no es tuyo")
-
-    session = stripe.checkout.Session.retrieve(servicio.stripe_payment_intent)
-    if session.payment_status != "paid":
-        return {"pagado": False}
-    fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first() if servicio.fontanero_id else None
-    # UPDATE...WHERE atómico: evita que dos llamadas concurrentes a /stripe/verificar
-    # del mismo servicio (reintento de red, doble navegación de vuelta del navegador)
-    # apliquen la comisión y consuman el trabajo gratis dos veces.
-    filas = db.query(models.Servicio).filter(
-        models.Servicio.id == servicio_id,
-        models.Servicio.estado != "pagado",
-    ).update({"estado": "pagado", "metodo_pago": "stripe"}, synchronize_session=False)
-    if filas > 0:
-        db.refresh(servicio)
-        servicio.comision_aplicada = round((servicio.precio or 0) * _aplicar_comision_atomica(db, fontanero_obj), 2)
-        servicio.comision_liquidada = True  # Stripe ya retuvo/repartió la comisión al cobrar
-        _aplicar_comision_empresa(db, servicio)
-        if fontanero_obj and fontanero_obj.usuario_id:
-            _crear_notificacion(db, fontanero_obj.usuario_id, "Pago recibido", f"Pago de {servicio.precio}€ confirmado por Stripe", "pago_recibido", servicio_id)
-        db.commit()
-    return {"pagado": True}
-
-@app.get("/pago-resultado")
-def pago_resultado(estado: str = "ok"):
-    from fastapi.responses import HTMLResponse
-    if estado == "ok":
-        titulo, texto = "✅ Pago completado", "Ya puedes cerrar esta ventana y volver a la app Multiservicios Provenza."
-    else:
-        titulo, texto = "Pago cancelado", "Puedes volver a la app Multiservicios Provenza e intentarlo de nuevo."
-    html = f"""<html><head><meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>body{{font-family:-apple-system,sans-serif;text-align:center;padding:60px 24px;background:#0A1A2A;color:#fff}}
-    h1{{font-size:22px}} p{{color:#9AA6B8}}</style></head>
-    <body><h1>{titulo}</h1><p>{texto}</p></body></html>"""
-    return HTMLResponse(html)
-
-# ─── STRIPE CONNECT (cobro automático para el fontanero) ─────────────────────
-
-def _stripe_o_501():
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(status_code=501, detail="Stripe no configurado. Añade STRIPE_SECRET_KEY en variables de entorno.")
-    import stripe
-    stripe.api_key = STRIPE_SECRET_KEY
-    return stripe
-
-@app.post("/fontaneros/{fontanero_id}/stripe/conectar")
-def conectar_stripe_fontanero(
-    fontanero_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(auth.get_current_user),
-):
-    """Genera (o reanuda) el onboarding de Stripe Connect Express para que el
-    fontanero reciba sus cobros directo a su cuenta bancaria."""
-    stripe = _stripe_o_501()
-    if fontanero_id != current_user["id"]:
-        raise HTTPException(status_code=403, detail="Solo el propio fontanero puede conectar su cuenta")
-    fontanero = get_or_create_fontanero(db, fontanero_id)
-    if not fontanero:
-        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
-
-    if not fontanero.stripe_account_id:
-        cuenta = stripe.Account.create(
-            type="express",
-            email=current_user.get("sub"),
-            capabilities={"card_payments": {"requested": True}, "transfers": {"requested": True}},
-        )
-        fontanero.stripe_account_id = cuenta.id
-        db.commit()
-
-    base_url = os.getenv("BACKEND_URL", "https://fontap-backend-production.up.railway.app")
-    link = stripe.AccountLink.create(
-        account=fontanero.stripe_account_id,
-        refresh_url=f"{base_url}/pago-resultado?estado=cancelado",
-        return_url=f"{base_url}/pago-resultado?estado=ok",
-        type="account_onboarding",
-    )
-    return {"onboarding_url": link.url}
-
-@app.get("/fontaneros/{fontanero_id}/stripe/estado")
-def estado_stripe_fontanero(
-    fontanero_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(auth.get_current_user),
-):
-    if fontanero_id != current_user["id"]:
-        raise HTTPException(status_code=403, detail="No puedes ver el estado de Stripe de otro fontanero")
-    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
-    if not fontanero:
-        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
-    if not fontanero.stripe_account_id:
-        return {"conectado": False, "cobros_activos": False}
-    stripe = _stripe_o_501()
-    cuenta = stripe.Account.retrieve(fontanero.stripe_account_id)
-    return {"conectado": True, "cobros_activos": bool(cuenta.charges_enabled)}
-
-# ─── COMISIÓN PENDIENTE (pagos en efectivo/Bizum que no pasan por Stripe) ─────
-# Bizum/transferencia de un profesional hacia la propia plataforma no se puede
-# verificar automáticamente (no hay integración real): el profesional ve el
+# ─── COMISIÓN PENDIENTE (lo que el profesional le debe a la plataforma) ──────
+# Los servicios cobrados en efectivo/Bizum no pasan dinero por la app, así que el
+# profesional le paga la comisión a Multiservicios Provenza aparte, por Bizum o
+# transferencia (nunca con tarjeta, para no depender de una pasarela de pago
+# dentro de la app). No se puede verificar automáticamente: el profesional ve el
 # importe y el destino, y un administrador la marca como pagada a mano tras
 # comprobarlo en el banco (ver /admin/fontaneros/{id}/comision-pendiente/marcar-pagada).
 COMISION_BIZUM_TELEFONO = os.getenv("COMISION_BIZUM_TELEFONO", "")
@@ -4858,85 +4659,6 @@ def comision_pendiente_transferencia(
     if total <= 0:
         raise HTTPException(status_code=400, detail="No tienes comisión pendiente")
     return _instrucciones_comision(fontanero, total, COMISION_TRANSFERENCIA_IBAN, "una", "transferencia")
-
-@app.post("/fontaneros/{fontanero_id}/comision-pendiente/pagar")
-def pagar_comision_pendiente(
-    fontanero_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(auth.get_current_user),
-):
-    stripe = _stripe_o_501()
-    if fontanero_id != current_user["id"]:
-        raise HTTPException(status_code=403, detail="No puedes pagar la comisión de otro fontanero")
-    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
-    if not fontanero:
-        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
-    pendientes = db.query(models.Servicio).filter(
-        models.Servicio.fontanero_id == fontanero.id,
-        models.Servicio.comision_liquidada == False,
-        models.Servicio.comision_aplicada != None,
-    ).all()
-    total = round(sum(s.comision_aplicada for s in pendientes), 2)
-    if total <= 0:
-        raise HTTPException(status_code=400, detail="No tienes comisión pendiente")
-
-    base_url = os.getenv("BACKEND_URL", "https://fontap-backend-production.up.railway.app")
-    session = stripe.checkout.Session.create(
-        mode="payment",
-        automatic_payment_methods={"enabled": True},
-        line_items=[{
-            "price_data": {
-                "currency": "eur",
-                "product_data": {"name": "Multiservicios Provenza — comisión pendiente"},
-                "unit_amount": round(total * 100),
-            },
-            "quantity": 1,
-        }],
-        metadata={
-            "fontanero_id": str(fontanero_id),
-            "tipo": "comision_pendiente",
-            # Fija qué servicios cubre este cobro exacto: si el fontanero liquida más
-            # trabajos en efectivo/Bizum mientras este checkout está pendiente de pago,
-            # /verificar no debe darlos por pagados también sin que medie dinero real.
-            "servicio_ids": ",".join(str(s.id) for s in pendientes),
-        },
-        success_url=f"{base_url}/pago-resultado?estado=ok",
-        cancel_url=f"{base_url}/pago-resultado?estado=cancelado",
-    )
-    fontanero.comision_checkout_session = session.id
-    db.commit()
-    return {"checkout_url": session.url, "session_id": session.id, "total": total}
-
-@app.post("/fontaneros/{fontanero_id}/comision-pendiente/verificar")
-def verificar_comision_pendiente(
-    fontanero_id: int,
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(auth.get_current_user),
-):
-    stripe = _stripe_o_501()
-    if fontanero_id != current_user["id"]:
-        raise HTTPException(status_code=403, detail="No puedes verificar la comisión de otro fontanero")
-    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
-    if not fontanero:
-        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
-    if not fontanero.comision_checkout_session:
-        raise HTTPException(status_code=400, detail="No hay un pago de comisión en curso")
-    session = stripe.checkout.Session.retrieve(fontanero.comision_checkout_session)
-    if session.payment_status == "paid":
-        ids_pagados_raw = (session.metadata or {}).get("servicio_ids", "")
-        ids_pagados = [int(sid) for sid in ids_pagados_raw.split(",") if sid.strip().isdigit()]
-        # Solo liquida los servicios que formaban parte de este cobro concreto (guardados
-        # en el metadata al crear el checkout): así, si el fontanero acumuló más comisión
-        # pendiente después de crear este checkout, esa comisión nueva sigue pendiente.
-        if ids_pagados:
-            db.query(models.Servicio).filter(
-                models.Servicio.fontanero_id == fontanero.id,
-                models.Servicio.id.in_(ids_pagados),
-                models.Servicio.comision_liquidada == False,
-            ).update({"comision_liquidada": True}, synchronize_session=False)
-        fontanero.comision_checkout_session = None
-        db.commit()
-    return {"liquidada": session.payment_status == "paid"}
 
 # ─── BIZUM ────────────────────────────────────────────────────────────────────
 
@@ -5204,7 +4926,6 @@ def admin_listar_fontaneros(
             "disponible": f.disponible,
             "valoracion": f.valoracion,
             "num_trabajos": f.num_trabajos or 0,
-            "stripe_conectado": bool(f.stripe_account_id),
             "comision_pendiente": round(comision_pendiente, 2),
             "bloqueado": usuario.bloqueado if usuario else False,
         })
