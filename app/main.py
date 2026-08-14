@@ -79,6 +79,7 @@ def _migrar_columnas_faltantes():
             "empresa_id": "INTEGER",
             "logo_empresa_url": "VARCHAR",
             "comision_empresa_porcentaje": "FLOAT",
+            "aviso_automatico_activo": "BOOLEAN DEFAULT FALSE",
         },
         "usuarios": {
             "terminos_aceptados": "BOOLEAN DEFAULT FALSE",
@@ -100,6 +101,7 @@ def _migrar_columnas_faltantes():
             "empresa_id": "INTEGER",
             "comision_empresa_aplicada": "FLOAT",
             "comision_empresa_liquidada": "BOOLEAN DEFAULT FALSE",
+            "catalogo_servicio_id": "INTEGER",
         },
         "favoritos": {
             "preferente": "BOOLEAN DEFAULT FALSE",
@@ -114,6 +116,7 @@ def _migrar_columnas_faltantes():
         },
         "mensajes": {
             "imagen_url": "VARCHAR",
+            "automatico": "BOOLEAN DEFAULT FALSE",
         },
         "ofertas_empleo": {
             "tipo_pago": "VARCHAR DEFAULT 'servicio'",
@@ -1622,13 +1625,26 @@ def _notificar_urgencia(db: Session, nuevo, tipo: str, solo_ciudad: bool):
 def _crear_servicio_interno(db: Session, cliente_id: int, tipo: str, descripcion: Optional[str],
                              urgente: bool, fecha, fontanero_id: Optional[int], gremio: Optional[str],
                              ciudad: Optional[str] = None, latitud_cliente: Optional[float] = None,
-                             longitud_cliente: Optional[float] = None, es_consulta: bool = False):
+                             longitud_cliente: Optional[float] = None, es_consulta: bool = False,
+                             catalogo_servicio_id: Optional[int] = None):
     fontanero_directo = None
     if fontanero_id:
         fontanero_directo = db.query(models.Fontanero).filter(models.Fontanero.id == fontanero_id).first()
+    # Solo se guarda la referencia al catálogo si de verdad pertenece al fontanero al
+    # que se le está pidiendo el servicio — si no, se ignora en vez de guardar un
+    # vínculo cruzado sin sentido (ej. cliente manipulando el body a mano).
+    catalogo_valido = None
+    if catalogo_servicio_id and fontanero_directo:
+        item = db.query(models.ServicioFontanero).filter(
+            models.ServicioFontanero.id == catalogo_servicio_id,
+            models.ServicioFontanero.fontanero_id == fontanero_directo.id,
+        ).first()
+        if item:
+            catalogo_valido = item.id
     nuevo = models.Servicio(
         cliente_id=cliente_id,
         fontanero_id=fontanero_id,
+        catalogo_servicio_id=catalogo_valido,
         tipo=tipo,
         descripcion=descripcion,
         urgente=urgente,
@@ -1693,7 +1709,7 @@ def crear_servicio(
         db, current_user["id"], servicio.tipo, servicio.descripcion,
         servicio.urgente, servicio.fecha, servicio.fontanero_id, servicio.gremio,
         servicio.ciudad, servicio.latitud_cliente, servicio.longitud_cliente,
-        servicio.es_consulta,
+        servicio.es_consulta, servicio.catalogo_servicio_id,
     )
     return schemas.ServicioRespuesta.from_orm_with_color(nuevo)
 
@@ -2589,10 +2605,22 @@ def añadir_servicio(
 @app.get("/fontaneros/{fontanero_id}/servicios", response_model=List[schemas.ServicioFontaneroRespuesta])
 def ver_servicios_fontanero(fontanero_id: int, db: Session = Depends(get_db)):
     fontanero = _resolver_fontanero(db, fontanero_id)
-    return db.query(models.ServicioFontanero).filter(
+    items = db.query(models.ServicioFontanero).filter(
         models.ServicioFontanero.fontanero_id == fontanero.id,
         models.ServicioFontanero.activo == True,
     ).all()
+    conteos = dict(
+        db.query(models.Servicio.catalogo_servicio_id, func.count(models.Servicio.id))
+        .filter(models.Servicio.catalogo_servicio_id.in_([i.id for i in items]))
+        .group_by(models.Servicio.catalogo_servicio_id)
+        .all()
+    ) if items else {}
+    resultado = []
+    for item in items:
+        r = schemas.ServicioFontaneroRespuesta.from_orm(item)
+        r.veces_solicitado = conteos.get(item.id, 0)
+        resultado.append(r)
+    return resultado
 
 @app.delete("/fontaneros/{fontanero_id}/servicios/{servicio_id}")
 def eliminar_servicio(
@@ -2870,6 +2898,8 @@ def actualizar_perfil_fontanero(
         fontanero.especialidades = datos.especialidades
     if datos.disponible_24h is not None:
         fontanero.disponible_24h = datos.disponible_24h
+    if datos.aviso_automatico_activo is not None:
+        fontanero.aviso_automatico_activo = datos.aviso_automatico_activo
     db.commit()
     return {"mensaje": "Perfil actualizado"}
 
@@ -5199,6 +5229,7 @@ def enviar_mensaje(
         fontanero_obj = db.query(models.Fontanero).filter(models.Fontanero.id == servicio.fontanero_id).first()
         if fontanero_obj and fontanero_obj.usuario_id:
             _crear_notificacion(db, fontanero_obj.usuario_id, "Nuevo mensaje", mensaje.contenido[:80], "mensaje", servicio_id)
+            _enviar_aviso_automatico_si_corresponde(db, fontanero_obj, servicio_id)
     elif servicio.cliente_id != emisor_id:
         _crear_notificacion(db, servicio.cliente_id, "Nuevo mensaje", mensaje.contenido[:80], "mensaje", servicio_id)
     db.commit()
@@ -5211,6 +5242,31 @@ def enviar_mensaje(
         "remitente_nombre": emisor.nombre if emisor else "Usuario",
         "creado_en": str(nuevo.creado_en),
     }
+
+def _enviar_aviso_automatico_si_corresponde(db: Session, fontanero: models.Fontanero, servicio_id: int) -> None:
+    """Si el profesional activó el aviso de "fuera de horario" y está marcado como no
+    disponible (pausado manualmente o en modo vacaciones — ambos ya ponen
+    disponible=False), le manda al cliente una respuesta automática una sola vez cada
+    4 horas por conversación, para no llenarle el chat de mensajes repetidos."""
+    if not fontanero.aviso_automatico_activo or fontanero.disponible or not fontanero.usuario_id:
+        return
+    hace_4h = datetime.datetime.utcnow() - datetime.timedelta(hours=4)
+    ya_avisado = db.query(models.Mensaje).filter(
+        models.Mensaje.servicio_id == servicio_id,
+        models.Mensaje.emisor_id == fontanero.usuario_id,
+        models.Mensaje.automatico == True,
+        models.Mensaje.creado_en >= hace_4h,
+    ).first()
+    if ya_avisado:
+        return
+    aviso = models.Mensaje(
+        servicio_id=servicio_id,
+        emisor_id=fontanero.usuario_id,
+        texto="Gracias por escribir — ahora mismo estoy fuera de horario. Te respondo en cuanto pueda.",
+        leido=False,
+        automatico=True,
+    )
+    db.add(aviso)
 
 @app.post("/servicios/{servicio_id}/mensajes/imagen")
 def enviar_mensaje_imagen(

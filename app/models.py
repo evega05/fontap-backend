@@ -53,12 +53,14 @@ class Fontanero(Base):
     empresa_id = Column(Integer, ForeignKey("fontaneros.id"), nullable=True)  # si es empleado de otro profesional
     logo_empresa_url = Column(String, nullable=True)
     comision_empresa_porcentaje = Column(Float, nullable=True)  # % que se queda el dueño de lo que factura cada empleado
+    aviso_automatico_activo = Column(Boolean, default=False)  # responde solo cuando está fuera de horario (disponible=False)
 
 class Servicio(Base):
     __tablename__ = "servicios"
     id = Column(Integer, primary_key=True, index=True)
     cliente_id = Column(Integer, ForeignKey("usuarios.id"))
     fontanero_id = Column(Integer, ForeignKey("fontaneros.id"), nullable=True)
+    catalogo_servicio_id = Column(Integer, ForeignKey("servicios_fontanero.id"), nullable=True)  # qué ítem del catálogo propio del profesional se pidió, si alguno
     tipo = Column(String)
     descripcion = Column(Text, nullable=True)
     urgente = Column(Boolean, default=False)
@@ -136,6 +138,7 @@ class Mensaje(Base):
     texto = Column(Text)
     imagen_url = Column(String, nullable=True)
     leido = Column(Boolean, default=False)
+    automatico = Column(Boolean, default=False)  # respuesta generada por el aviso de "fuera de horario"
     creado_en = Column(DateTime, default=utcnow)
 
 class TokenPush(Base):

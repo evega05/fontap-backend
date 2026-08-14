@@ -75,6 +75,7 @@ class FontaneroRespuesta(BaseModel):
     equipo_valoracion_media: Optional[float] = None
     equipo_num_trabajos: int = 0
     equipo_num_miembros: int = 0
+    aviso_automatico_activo: bool = False
     class Config:
         from_attributes = True
 
@@ -127,6 +128,7 @@ class FontaneroActualizar(BaseModel):
     especialidades: Optional[str] = None
     disponible_24h: Optional[bool] = None
     gremio: Optional[str] = None
+    aviso_automatico_activo: Optional[bool] = None
 
 class AdminFontaneroEditar(BaseModel):
     nombre: Optional[str] = None
@@ -172,6 +174,7 @@ class ServicioCrear(BaseModel):
     urgente: bool = False
     fecha: Optional[datetime.datetime] = None
     fontanero_id: Optional[int] = None
+    catalogo_servicio_id: Optional[int] = None
     gremio: Optional[str] = None
     ciudad: Optional[str] = None
     latitud_cliente: Optional[float] = None
@@ -232,6 +235,7 @@ class ServicioFontaneroRespuesta(BaseModel):
     precio: float
     duracion_minutos: int
     activo: bool
+    veces_solicitado: int = 0
     class Config:
         from_attributes = True
 
