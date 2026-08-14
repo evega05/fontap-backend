@@ -122,6 +122,30 @@ class EquipoMiembroRespuesta(BaseModel):
 class ServicioAsignarEmpleado(BaseModel):
     empleado_fontanero_id: int
 
+class TareaEmpleadoCrear(BaseModel):
+    empleado_fontanero_id: int
+    descripcion: str
+    servicio_id: Optional[int] = None
+
+class TareaEmpleadoEstadoActualizar(BaseModel):
+    estado: str  # aceptada, en_camino, terminada
+
+class TareaEmpleadoRespuesta(BaseModel):
+    id: int
+    empresa_id: int
+    empleado_id: int
+    empleado_nombre: Optional[str] = None
+    empleado_latitud: Optional[float] = None
+    empleado_longitud: Optional[float] = None
+    servicio_id: Optional[int] = None
+    descripcion: str
+    estado: str
+    creado_en: datetime.datetime
+    nombre_empresa: Optional[str] = None
+    logo_empresa_url: Optional[str] = None
+    class Config:
+        from_attributes = True
+
 class FontaneroActualizar(BaseModel):
     zona: Optional[str] = None
     descripcion: Optional[str] = None

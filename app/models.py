@@ -130,6 +130,21 @@ class ImagenServicio(Base):
     url = Column(String)
     creado_en = Column(DateTime, default=utcnow)
 
+class TareaEmpleado(Base):
+    """Instrucción/aviso rápido que el dueño de la empresa le manda a un empleado —
+    distinta de asignarle un Servicio (trabajo real de un cliente): esto es para avisos
+    internos ("pasá a buscar materiales", "andá a la obra de la calle X"), opcionalmente
+    ligados a un servicio si corresponde. La ubicación del empleado en "en_camino" se lee
+    de Fontanero.latitud/longitud (el mismo tracking que ya existe), no se duplica acá."""
+    __tablename__ = "tareas_empleado"
+    id = Column(Integer, primary_key=True, index=True)
+    empresa_id = Column(Integer, ForeignKey("fontaneros.id"))  # Fontanero.id del jefe
+    empleado_id = Column(Integer, ForeignKey("fontaneros.id"))  # Fontanero.id del empleado
+    servicio_id = Column(Integer, ForeignKey("servicios.id"), nullable=True)
+    descripcion = Column(Text)
+    estado = Column(String, default="pendiente")  # pendiente, aceptada, en_camino, terminada
+    creado_en = Column(DateTime, default=utcnow)
+
 class Mensaje(Base):
     __tablename__ = "mensajes"
     id = Column(Integer, primary_key=True, index=True)

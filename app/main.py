@@ -3711,6 +3711,135 @@ def asignar_empleado(
     db.commit()
     return schemas.ServicioRespuesta.from_orm_with_color(servicio)
 
+# ─── TAREAS DE EMPLEADO (avisos/instrucciones del jefe, separado de asignar un Servicio) ──
+
+def _tarea_a_respuesta(db: Session, tarea: models.TareaEmpleado) -> schemas.TareaEmpleadoRespuesta:
+    empleado = db.query(models.Fontanero).filter(models.Fontanero.id == tarea.empleado_id).first()
+    dueño = db.query(models.Fontanero).filter(models.Fontanero.id == tarea.empresa_id).first()
+    r = schemas.TareaEmpleadoRespuesta.from_orm(tarea)
+    r.empleado_nombre = empleado.nombre if empleado else None
+    r.empleado_latitud = empleado.latitud if empleado else None
+    r.empleado_longitud = empleado.longitud if empleado else None
+    r.nombre_empresa = dueño.nombre_empresa if dueño else None
+    r.logo_empresa_url = dueño.logo_empresa_url if dueño else None
+    return r
+
+@app.post("/tareas", response_model=schemas.TareaEmpleadoRespuesta)
+def crear_tarea_empleado(
+    datos: schemas.TareaEmpleadoCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    dueño = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == current_user["id"]).first()
+    if not dueño:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    empleado = db.query(models.Fontanero).filter(
+        models.Fontanero.id == datos.empleado_fontanero_id,
+        models.Fontanero.empresa_id == dueño.id,
+    ).first()
+    if not empleado:
+        raise HTTPException(status_code=404, detail="Ese profesional no es un empleado de tu equipo")
+    if datos.servicio_id is not None:
+        servicio = db.query(models.Servicio).filter(models.Servicio.id == datos.servicio_id).first()
+        if not servicio or servicio.fontanero_id not in (dueño.id, empleado.id):
+            raise HTTPException(status_code=404, detail="Ese servicio no pertenece a tu equipo")
+    nueva = models.TareaEmpleado(
+        empresa_id=dueño.id,
+        empleado_id=empleado.id,
+        servicio_id=datos.servicio_id,
+        descripcion=datos.descripcion,
+        estado="pendiente",
+    )
+    db.add(nueva)
+    db.commit()
+    db.refresh(nueva)
+    if empleado.usuario_id:
+        _crear_notificacion(
+            db, empleado.usuario_id,
+            "🚨 Nuevo mensaje de la empresa",
+            datos.descripcion[:120],
+            "nueva_tarea", nueva.id,
+        )
+        db.commit()
+    return _tarea_a_respuesta(db, nueva)
+
+@app.get("/fontaneros/{fontanero_id}/tareas", response_model=List[schemas.TareaEmpleadoRespuesta])
+def ver_tareas_empleado(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Tareas del propio empleado logueado — el fontanero_id del path es su usuario_id,
+    igual que en el resto de rutas /fontaneros/{fontanero_id}/..."""
+    _verificar_fontanero_propio(current_user, fontanero_id)
+    empleado = _resolver_fontanero(db, fontanero_id)
+    tareas = db.query(models.TareaEmpleado).filter(
+        models.TareaEmpleado.empleado_id == empleado.id,
+        models.TareaEmpleado.estado != "terminada",
+    ).order_by(models.TareaEmpleado.creado_en.desc()).all()
+    return [_tarea_a_respuesta(db, t) for t in tareas]
+
+@app.get("/tareas/{tarea_id}", response_model=schemas.TareaEmpleadoRespuesta)
+def ver_tarea(
+    tarea_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    tarea = db.query(models.TareaEmpleado).filter(models.TareaEmpleado.id == tarea_id).first()
+    if not tarea:
+        raise HTTPException(status_code=404, detail="Tarea no encontrada")
+    empleado = db.query(models.Fontanero).filter(models.Fontanero.id == tarea.empleado_id).first()
+    dueño = db.query(models.Fontanero).filter(models.Fontanero.id == tarea.empresa_id).first()
+    if current_user["id"] not in ((empleado.usuario_id if empleado else None), (dueño.usuario_id if dueño else None)):
+        raise HTTPException(status_code=403, detail="No puedes ver esta tarea")
+    return _tarea_a_respuesta(db, tarea)
+
+ESTADOS_TAREA_VALIDOS = {"aceptada", "en_camino", "terminada"}
+
+@app.put("/tareas/{tarea_id}/estado", response_model=schemas.TareaEmpleadoRespuesta)
+def actualizar_estado_tarea(
+    tarea_id: int,
+    datos: schemas.TareaEmpleadoEstadoActualizar,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    if datos.estado not in ESTADOS_TAREA_VALIDOS:
+        raise HTTPException(status_code=400, detail=f"Estado inválido, debe ser uno de: {', '.join(sorted(ESTADOS_TAREA_VALIDOS))}")
+    tarea = db.query(models.TareaEmpleado).filter(models.TareaEmpleado.id == tarea_id).first()
+    if not tarea:
+        raise HTTPException(status_code=404, detail="Tarea no encontrada")
+    empleado = db.query(models.Fontanero).filter(models.Fontanero.id == tarea.empleado_id).first()
+    if not empleado or empleado.usuario_id != current_user["id"]:
+        raise HTTPException(status_code=403, detail="No puedes actualizar esta tarea")
+    tarea.estado = datos.estado
+    db.commit()
+    dueño = db.query(models.Fontanero).filter(models.Fontanero.id == tarea.empresa_id).first()
+    if dueño and dueño.usuario_id:
+        etiquetas = {"aceptada": "aceptó", "en_camino": "va en camino a", "terminada": "terminó"}
+        _crear_notificacion(
+            db, dueño.usuario_id, "Actualización de tarea",
+            f"{empleado.nombre} {etiquetas.get(datos.estado, 'actualizó')} la tarea",
+            "tarea_actualizada", tarea.id,
+        )
+        db.commit()
+    return _tarea_a_respuesta(db, tarea)
+
+@app.get("/fontaneros/{fontanero_id}/tareas-equipo", response_model=List[schemas.TareaEmpleadoRespuesta])
+def ver_tareas_equipo(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Vista del jefe: todas las tareas activas que repartió entre su equipo, con la
+    última ubicación conocida de cada empleado si está en camino."""
+    _verificar_fontanero_propio(current_user, fontanero_id)
+    dueño = _resolver_fontanero(db, fontanero_id)
+    tareas = db.query(models.TareaEmpleado).filter(
+        models.TareaEmpleado.empresa_id == dueño.id,
+        models.TareaEmpleado.estado != "terminada",
+    ).order_by(models.TareaEmpleado.creado_en.desc()).all()
+    return [_tarea_a_respuesta(db, t) for t in tareas]
+
 @app.get("/fontaneros/{fontanero_id}/comision-empresa-pendiente", response_model=schemas.ComisionEmpresaRespuesta)
 def comision_empresa_pendiente(
     fontanero_id: int,
