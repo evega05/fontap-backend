@@ -58,6 +58,7 @@ class FontaneroRespuesta(BaseModel):
     vacaciones_desde: Optional[datetime.datetime] = None
     vacaciones_hasta: Optional[datetime.datetime] = None
     gremio: Optional[str] = None
+    gremios: List[str] = []  # gremio principal + adicionales (ver FontaneroGremio) — un profesional puede tener varios
     verificado: bool = False
     certificado_pro: bool = False
     num_trabajos: int = 0
@@ -153,6 +154,20 @@ class FontaneroActualizar(BaseModel):
     disponible_24h: Optional[bool] = None
     gremio: Optional[str] = None
     aviso_automatico_activo: Optional[bool] = None
+
+class GremioAgregar(BaseModel):
+    gremio: str
+
+class FontaneroGremioRespuesta(BaseModel):
+    gremio: str
+    es_principal: bool
+
+class EstadisticaGremio(BaseModel):
+    gremio: str
+    es_principal: bool
+    num_trabajos: int
+    valoracion_media: Optional[float] = None
+    num_resenas: int
 
 class AdminFontaneroEditar(BaseModel):
     nombre: Optional[str] = None

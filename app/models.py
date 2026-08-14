@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, Float, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Boolean, Float, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from .database import Base
 import datetime
@@ -54,6 +54,16 @@ class Fontanero(Base):
     logo_empresa_url = Column(String, nullable=True)
     comision_empresa_porcentaje = Column(Float, nullable=True)  # % que se queda el dueño de lo que factura cada empleado
     aviso_automatico_activo = Column(Boolean, default=False)  # responde solo cuando está fuera de horario (disponible=False)
+
+class FontaneroGremio(Base):
+    """Gremios adicionales que practica un profesional, además de su gremio principal
+    (Fontanero.gremio) — un profesional puede dedicarse a varios oficios a la vez."""
+    __tablename__ = "fontanero_gremios"
+    __table_args__ = (UniqueConstraint("fontanero_id", "gremio", name="uq_fontanero_gremio"),)
+    id = Column(Integer, primary_key=True, index=True)
+    fontanero_id = Column(Integer, ForeignKey("fontaneros.id"))
+    gremio = Column(String)
+    creado_en = Column(DateTime, default=utcnow)
 
 class Servicio(Base):
     __tablename__ = "servicios"

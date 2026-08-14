@@ -1404,6 +1404,32 @@ def eliminar_cuenta(
 
 # ─── FONTANEROS ────────────────────────────────────────────────────────────────
 
+def _gremios_de_fontanero(db: Session, fontanero) -> List[str]:
+    """Todos los gremios que practica un profesional: el principal (Fontanero.gremio)
+    primero, seguido de los adicionales (FontaneroGremio) — un profesional puede
+    dedicarse a varios oficios a la vez."""
+    adicionales = [
+        g for (g,) in db.query(models.FontaneroGremio.gremio).filter(
+            models.FontaneroGremio.fontanero_id == fontanero.id
+        ).all()
+    ]
+    gremios = []
+    if fontanero.gremio:
+        gremios.append(fontanero.gremio)
+    for g in adicionales:
+        if g not in gremios:
+            gremios.append(g)
+    return gremios
+
+def _condicion_practica_gremio(db: Session, gremio: str):
+    """Condición SQLAlchemy: el fontanero practica este gremio, como principal o
+    como adicional — para que aparezca en búsquedas/avisos de cualquiera de sus
+    oficios, no solo el principal."""
+    ids_adicional = db.query(models.FontaneroGremio.fontanero_id).filter(
+        models.FontaneroGremio.gremio == gremio
+    )
+    return or_(models.Fontanero.gremio == gremio, models.Fontanero.id.in_(ids_adicional))
+
 @app.get("/fontaneros", response_model=List[schemas.FontaneroRespuesta])
 def listar_fontaneros(
     gremio: Optional[str] = None,
@@ -1423,7 +1449,7 @@ def listar_fontaneros(
         or_(models.Usuario.email_verificado == True, models.Fontanero.usuario_id == None),
     )
     if gremio:
-        query = query.filter(models.Fontanero.gremio == gremio)
+        query = query.filter(_condicion_practica_gremio(db, gremio))
     if ciudad:
         query = query.filter(func.lower(models.Fontanero.zona) == ciudad.lower())
     if cliente_id and cliente_id == current_user["id"]:
@@ -1453,6 +1479,7 @@ def listar_fontaneros(
         item.precio_desde = precios_min.get(f.id)
         item.servicios = servicios_por_fontanero.get(f.id, [])
         item.codigo_referido = None  # solo le sirve al propio dueño (ver /fontaneros/{id}/perfil)
+        item.gremios = _gremios_de_fontanero(db, f)
         resultado.append(item)
     return resultado
 
@@ -1480,10 +1507,11 @@ def actualizar_disponibilidad(
     db.commit()
 
     if pasa_a_disponible:
-        espera = db.query(models.ListaEspera).filter(models.ListaEspera.gremio == fontanero.gremio).all()
+        gremios_practicados = _gremios_de_fontanero(db, fontanero)
+        espera = db.query(models.ListaEspera).filter(models.ListaEspera.gremio.in_(gremios_practicados)).all()
         for e in espera:
             _crear_notificacion(db, e.cliente_id, "¡Hay alguien libre!",
-                                 f"Un profesional de {fontanero.gremio} ya está disponible", "lista_espera", fontanero.id)
+                                 f"Un profesional de {e.gremio} ya está disponible", "lista_espera", fontanero.id)
             db.delete(e)
         if espera:
             db.commit()
@@ -1613,7 +1641,7 @@ def _notificar_urgencia(db: Session, nuevo, tipo: str, solo_ciudad: bool):
     ).filter(
         models.Fontanero.disponible == True,
         models.Fontanero.usuario_id != None,
-        models.Fontanero.gremio == nuevo.gremio,
+        _condicion_practica_gremio(db, nuevo.gremio),
         models.Usuario.email_verificado == True,
         ~models.Fontanero.id.in_(bloqueados),
     )
@@ -1641,6 +1669,14 @@ def _crear_servicio_interno(db: Session, cliente_id: int, tipo: str, descripcion
         ).first()
         if item:
             catalogo_valido = item.id
+    # Si se pide directo a un profesional que practica varios gremios, se respeta el
+    # gremio explícito que eligió el cliente (para clasificar bien el servicio y las
+    # reseñas que salgan de él) — solo se cae al gremio principal si no mandó uno
+    # válido de los que ese profesional realmente practica.
+    gremio_final = gremio
+    if fontanero_directo:
+        gremios_practicados = _gremios_de_fontanero(db, fontanero_directo)
+        gremio_final = gremio if gremio in gremios_practicados else fontanero_directo.gremio
     nuevo = models.Servicio(
         cliente_id=cliente_id,
         fontanero_id=fontanero_id,
@@ -1652,7 +1688,7 @@ def _crear_servicio_interno(db: Session, cliente_id: int, tipo: str, descripcion
         estado="pendiente",
         precio=None,
         es_consulta=es_consulta,
-        gremio=fontanero_directo.gremio if fontanero_directo else gremio,
+        gremio=gremio_final,
         ciudad=ciudad,
         latitud_cliente=latitud_cliente,
         longitud_cliente=longitud_cliente,
@@ -1683,7 +1719,7 @@ def _avisar_preferente(db: Session, nuevo, tipo: str) -> None:
     ).filter(
         models.Favorito.cliente_id == nuevo.cliente_id,
         models.Favorito.preferente == True,
-        models.Fontanero.gremio == nuevo.gremio,
+        _condicion_practica_gremio(db, nuevo.gremio),
         models.Fontanero.disponible == True,
     ).first()
     if not favorito_preferente:
@@ -2900,8 +2936,99 @@ def actualizar_perfil_fontanero(
         fontanero.disponible_24h = datos.disponible_24h
     if datos.aviso_automatico_activo is not None:
         fontanero.aviso_automatico_activo = datos.aviso_automatico_activo
+    if datos.gremio is not None and datos.gremio != fontanero.gremio:
+        if datos.gremio not in GREMIOS_VALIDOS:
+            raise HTTPException(status_code=422, detail="Gremio no válido")
+        anterior = fontanero.gremio
+        # El gremio anterior se conserva como adicional (no se pierde el historial de
+        # reseñas/servicios ya clasificados ahí) salvo que ya estuviera guardado.
+        if anterior:
+            ya_existe = db.query(models.FontaneroGremio).filter(
+                models.FontaneroGremio.fontanero_id == fontanero.id,
+                models.FontaneroGremio.gremio == anterior,
+            ).first()
+            if not ya_existe:
+                db.add(models.FontaneroGremio(fontanero_id=fontanero.id, gremio=anterior))
+        # Si el nuevo principal ya estaba como adicional, se saca de ahí para no duplicarlo.
+        db.query(models.FontaneroGremio).filter(
+            models.FontaneroGremio.fontanero_id == fontanero.id,
+            models.FontaneroGremio.gremio == datos.gremio,
+        ).delete()
+        fontanero.gremio = datos.gremio
     db.commit()
     return {"mensaje": "Perfil actualizado"}
+
+@app.get("/fontaneros/{fontanero_id}/gremios", response_model=List[schemas.FontaneroGremioRespuesta])
+def ver_gremios_fontanero(
+    fontanero_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    resultado = []
+    if fontanero.gremio:
+        resultado.append(schemas.FontaneroGremioRespuesta(gremio=fontanero.gremio, es_principal=True))
+    adicionales = db.query(models.FontaneroGremio).filter(
+        models.FontaneroGremio.fontanero_id == fontanero.id
+    ).order_by(models.FontaneroGremio.id).all()
+    for a in adicionales:
+        resultado.append(schemas.FontaneroGremioRespuesta(gremio=a.gremio, es_principal=False))
+    return resultado
+
+@app.post("/fontaneros/{fontanero_id}/gremios", response_model=List[schemas.FontaneroGremioRespuesta])
+def agregar_gremio_fontanero(
+    fontanero_id: int,
+    datos: schemas.GremioAgregar,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _verificar_fontanero_propio(current_user, fontanero_id)
+    if datos.gremio not in GREMIOS_VALIDOS:
+        raise HTTPException(status_code=422, detail="Gremio no válido")
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    if datos.gremio == fontanero.gremio:
+        raise HTTPException(status_code=400, detail="Ya es tu gremio principal")
+    ya_existe = db.query(models.FontaneroGremio).filter(
+        models.FontaneroGremio.fontanero_id == fontanero.id,
+        models.FontaneroGremio.gremio == datos.gremio,
+    ).first()
+    if not ya_existe:
+        db.add(models.FontaneroGremio(fontanero_id=fontanero.id, gremio=datos.gremio))
+        db.commit()
+    return ver_gremios_fontanero(fontanero_id, db, current_user)
+
+@app.delete("/fontaneros/{fontanero_id}/gremios/{gremio}")
+def quitar_gremio_fontanero(
+    fontanero_id: int,
+    gremio: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _verificar_fontanero_propio(current_user, fontanero_id)
+    fontanero = db.query(models.Fontanero).filter(
+        models.Fontanero.usuario_id == fontanero_id
+    ).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    if gremio == fontanero.gremio:
+        raise HTTPException(status_code=400, detail="No puedes quitar tu gremio principal — cambialo desde tu perfil primero")
+    entrada = db.query(models.FontaneroGremio).filter(
+        models.FontaneroGremio.fontanero_id == fontanero.id,
+        models.FontaneroGremio.gremio == gremio,
+    ).first()
+    if not entrada:
+        raise HTTPException(status_code=404, detail="No tenías ese gremio agregado")
+    db.delete(entrada)
+    db.commit()
+    return {"mensaje": "Gremio eliminado"}
 
 @app.post("/fontaneros/{fontanero_id}/foto")
 def subir_foto_perfil(
@@ -2965,6 +3092,7 @@ def ver_perfil_fontanero(
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
     item = schemas.FontaneroRespuesta.model_validate(fontanero)
+    item.gremios = _gremios_de_fontanero(db, fontanero)
     # El código de referido solo le sirve al propio profesional (para compartirlo);
     # a cualquier otra persona que consulte este perfil público no se le expone.
     if current_user.get("id") != fontanero_id:
@@ -3337,7 +3465,7 @@ def buscar_fontaneros(
     if zona:
         q = q.filter(models.Fontanero.zona.ilike(f"%{zona}%"))
     if gremio:
-        q = q.filter(models.Fontanero.gremio == gremio)
+        q = q.filter(_condicion_practica_gremio(db, gremio))
     if disponible_24h is not None:
         q = q.filter(models.Fontanero.disponible_24h == disponible_24h)
     if verificado is not None:
@@ -3347,6 +3475,7 @@ def buscar_fontaneros(
     for f in fontaneros:
         item = schemas.FontaneroRespuesta.model_validate(f)
         item.codigo_referido = None  # solo le sirve al propio dueño (ver /fontaneros/{id}/perfil)
+        item.gremios = _gremios_de_fontanero(db, f)
         resultado.append(item)
     return resultado
 
@@ -3966,6 +4095,7 @@ def listar_favoritos(
         item = schemas.FontaneroRespuesta.model_validate(f)
         item.codigo_referido = None  # solo le sirve al propio dueño (ver /fontaneros/{id}/perfil)
         item.favorito_preferente = bool(preferente_por_fontanero.get(f.id))
+        item.gremios = _gremios_de_fontanero(db, f)
         resultado.append(item)
     return resultado
 
@@ -4232,7 +4362,7 @@ def crear_resena(
     return resena
 
 @app.get("/fontaneros/{fontanero_id}/resenas", response_model=List[schemas.ResenaRespuesta])
-def ver_resenas(fontanero_id: int, db: Session = Depends(get_db)):
+def ver_resenas(fontanero_id: int, gremio: Optional[str] = None, db: Session = Depends(get_db)):
     fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
     if not fontanero:
         raise HTTPException(status_code=404, detail="Fontanero no encontrado")
@@ -4249,7 +4379,13 @@ def ver_resenas(fontanero_id: int, db: Session = Depends(get_db)):
         filtro_fontanero = models.Resena.fontanero_id.in_(ids_equipo)
     else:
         filtro_fontanero = models.Resena.fontanero_id == fontanero.id
-    resenas = db.query(models.Resena).filter(filtro_fontanero).order_by(models.Resena.creado_en.desc()).all()
+    query = db.query(models.Resena).filter(filtro_fontanero)
+    if gremio:
+        # Un profesional puede practicar varios gremios: el gremio de la reseña se
+        # obtiene del servicio al que corresponde, no de la reseña en sí.
+        ids_servicios_gremio = db.query(models.Servicio.id).filter(models.Servicio.gremio == gremio)
+        query = query.filter(models.Resena.servicio_id.in_(ids_servicios_gremio))
+    resenas = query.order_by(models.Resena.creado_en.desc()).all()
     resultado = []
     for r in resenas:
         item = schemas.ResenaRespuesta.model_validate(r, from_attributes=True)
@@ -4259,6 +4395,40 @@ def ver_resenas(fontanero_id: int, db: Session = Depends(get_db)):
             autor = db.query(models.Fontanero).filter(models.Fontanero.id == r.fontanero_id).first()
             item.fontanero_nombre = autor.nombre if autor else None
         resultado.append(item)
+    return resultado
+
+@app.get("/fontaneros/{fontanero_id}/estadisticas-por-gremio", response_model=List[schemas.EstadisticaGremio])
+def ver_estadisticas_por_gremio(fontanero_id: int, db: Session = Depends(get_db)):
+    """Trabajos y valoración por cada gremio que practica el profesional, por
+    separado — un profesional que hace de electricista y de fontanero a la vez no
+    debería mezclar sus reseñas de un oficio con las del otro."""
+    fontanero = db.query(models.Fontanero).filter(models.Fontanero.usuario_id == fontanero_id).first()
+    if not fontanero:
+        raise HTTPException(status_code=404, detail="Fontanero no encontrado")
+    resultado = []
+    for g in _gremios_de_fontanero(db, fontanero):
+        num_trabajos = db.query(models.Servicio).filter(
+            models.Servicio.fontanero_id == fontanero.id,
+            models.Servicio.gremio == g,
+            models.Servicio.estado == "pagado",
+        ).count()
+        ids_servicios = db.query(models.Servicio.id).filter(
+            models.Servicio.fontanero_id == fontanero.id,
+            models.Servicio.gremio == g,
+        )
+        resenas = db.query(models.Resena).filter(models.Resena.servicio_id.in_(ids_servicios)).all()
+        valoracion_media = None
+        if resenas:
+            valoracion_media = round(
+                sum((r.puntualidad + r.calidad + r.precio_justo + r.trato) / 4 for r in resenas) / len(resenas), 2
+            )
+        resultado.append(schemas.EstadisticaGremio(
+            gremio=g,
+            es_principal=(g == fontanero.gremio),
+            num_trabajos=num_trabajos,
+            valoracion_media=valoracion_media,
+            num_resenas=len(resenas),
+        ))
     return resultado
 
 @app.post("/servicios/{servicio_id}/resena-cliente", response_model=schemas.ResenaClienteRespuesta)
