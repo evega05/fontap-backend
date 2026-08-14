@@ -126,6 +126,13 @@ def _migrar_columnas_faltantes():
             "usuario_id": "INTEGER",
             "servicio_id": "INTEGER",
         },
+        "tareas_empleado": {
+            "fecha_objetivo": "TIMESTAMP",
+            "urgente": "BOOLEAN DEFAULT FALSE",
+            "motivo_rechazo": "TEXT",
+            "nota_finalizacion": "TEXT",
+            "recordatorio_enviado": "BOOLEAN DEFAULT FALSE",
+        },
     }
     with engine.begin() as conn:
         for tabla, columnas_nuevas in por_tabla.items():
@@ -3842,6 +3849,8 @@ def asignar_empleado(
 
 # ─── TAREAS DE EMPLEADO (avisos/instrucciones del jefe, separado de asignar un Servicio) ──
 
+ESTADOS_TERMINALES_TAREA = ("terminada", "rechazada")
+
 def _tarea_a_respuesta(db: Session, tarea: models.TareaEmpleado) -> schemas.TareaEmpleadoRespuesta:
     empleado = db.query(models.Fontanero).filter(models.Fontanero.id == tarea.empleado_id).first()
     dueño = db.query(models.Fontanero).filter(models.Fontanero.id == tarea.empresa_id).first()
@@ -3851,6 +3860,7 @@ def _tarea_a_respuesta(db: Session, tarea: models.TareaEmpleado) -> schemas.Tare
     r.empleado_longitud = empleado.longitud if empleado else None
     r.nombre_empresa = dueño.nombre_empresa if dueño else None
     r.logo_empresa_url = dueño.logo_empresa_url if dueño else None
+    r.empresa_telefono = dueño.telefono if dueño else None
     return r
 
 @app.post("/tareas", response_model=schemas.TareaEmpleadoRespuesta)
@@ -3878,34 +3888,40 @@ def crear_tarea_empleado(
         servicio_id=datos.servicio_id,
         descripcion=datos.descripcion,
         estado="pendiente",
+        fecha_objetivo=datos.fecha_objetivo,
+        urgente=datos.urgente,
     )
     db.add(nueva)
     db.commit()
     db.refresh(nueva)
     if empleado.usuario_id:
-        _crear_notificacion(
-            db, empleado.usuario_id,
-            "🚨 Nuevo mensaje de la empresa",
-            datos.descripcion[:120],
-            "nueva_tarea", nueva.id,
-        )
+        # Un tipo de notificación distinto para las urgentes, así el modal de alerta y
+        # el push (sonido/vibración) pueden tratarlas distinto sin tocar el resto del
+        # mecanismo de notificaciones.
+        tipo_notif = "nueva_tarea_urgente" if nueva.urgente else "nueva_tarea"
+        titulo_notif = "🔴 Aviso urgente de la empresa" if nueva.urgente else "🚨 Nuevo mensaje de la empresa"
+        _crear_notificacion(db, empleado.usuario_id, titulo_notif, datos.descripcion[:120], tipo_notif, nueva.id)
         db.commit()
     return _tarea_a_respuesta(db, nueva)
 
 @app.get("/fontaneros/{fontanero_id}/tareas", response_model=List[schemas.TareaEmpleadoRespuesta])
 def ver_tareas_empleado(
     fontanero_id: int,
+    historial: bool = False,
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user),
 ):
     """Tareas del propio empleado logueado — el fontanero_id del path es su usuario_id,
-    igual que en el resto de rutas /fontaneros/{fontanero_id}/..."""
+    igual que en el resto de rutas /fontaneros/{fontanero_id}/... Con historial=true
+    devuelve lo ya cerrado (terminada/rechazada) en vez de lo activo."""
     _verificar_fontanero_propio(current_user, fontanero_id)
     empleado = _resolver_fontanero(db, fontanero_id)
-    tareas = db.query(models.TareaEmpleado).filter(
-        models.TareaEmpleado.empleado_id == empleado.id,
-        models.TareaEmpleado.estado != "terminada",
-    ).order_by(models.TareaEmpleado.creado_en.desc()).all()
+    query = db.query(models.TareaEmpleado).filter(models.TareaEmpleado.empleado_id == empleado.id)
+    if historial:
+        query = query.filter(models.TareaEmpleado.estado.in_(ESTADOS_TERMINALES_TAREA))
+    else:
+        query = query.filter(~models.TareaEmpleado.estado.in_(ESTADOS_TERMINALES_TAREA))
+    tareas = query.order_by(models.TareaEmpleado.creado_en.desc()).all()
     return [_tarea_a_respuesta(db, t) for t in tareas]
 
 @app.get("/tareas/{tarea_id}", response_model=schemas.TareaEmpleadoRespuesta)
@@ -3923,7 +3939,7 @@ def ver_tarea(
         raise HTTPException(status_code=403, detail="No puedes ver esta tarea")
     return _tarea_a_respuesta(db, tarea)
 
-ESTADOS_TAREA_VALIDOS = {"aceptada", "en_camino", "terminada"}
+ESTADOS_TAREA_VALIDOS = {"aceptada", "en_camino", "terminada", "rechazada"}
 
 @app.put("/tareas/{tarea_id}/estado", response_model=schemas.TareaEmpleadoRespuesta)
 def actualizar_estado_tarea(
@@ -3941,15 +3957,20 @@ def actualizar_estado_tarea(
     if not empleado or empleado.usuario_id != current_user["id"]:
         raise HTTPException(status_code=403, detail="No puedes actualizar esta tarea")
     tarea.estado = datos.estado
+    if datos.estado == "rechazada":
+        tarea.motivo_rechazo = datos.motivo
+    if datos.estado == "terminada":
+        tarea.nota_finalizacion = datos.nota
     db.commit()
     dueño = db.query(models.Fontanero).filter(models.Fontanero.id == tarea.empresa_id).first()
     if dueño and dueño.usuario_id:
-        etiquetas = {"aceptada": "aceptó", "en_camino": "va en camino a", "terminada": "terminó"}
-        _crear_notificacion(
-            db, dueño.usuario_id, "Actualización de tarea",
-            f"{empleado.nombre} {etiquetas.get(datos.estado, 'actualizó')} la tarea",
-            "tarea_actualizada", tarea.id,
-        )
+        etiquetas = {"aceptada": "aceptó", "en_camino": "va en camino a", "terminada": "terminó", "rechazada": "no puede hacer"}
+        cuerpo = f"{empleado.nombre} {etiquetas.get(datos.estado, 'actualizó')} la tarea"
+        if datos.estado == "rechazada" and datos.motivo:
+            cuerpo += f": {datos.motivo[:100]}"
+        if datos.estado == "terminada" and datos.nota:
+            cuerpo += f" — {datos.nota[:80]}"
+        _crear_notificacion(db, dueño.usuario_id, "Actualización de tarea", cuerpo, "tarea_actualizada", tarea.id)
         db.commit()
     return _tarea_a_respuesta(db, tarea)
 
@@ -3965,9 +3986,108 @@ def ver_tareas_equipo(
     dueño = _resolver_fontanero(db, fontanero_id)
     tareas = db.query(models.TareaEmpleado).filter(
         models.TareaEmpleado.empresa_id == dueño.id,
-        models.TareaEmpleado.estado != "terminada",
+        ~models.TareaEmpleado.estado.in_(ESTADOS_TERMINALES_TAREA),
     ).order_by(models.TareaEmpleado.creado_en.desc()).all()
     return [_tarea_a_respuesta(db, t) for t in tareas]
+
+def _verificar_acceso_tarea(current_user: dict, tarea: models.TareaEmpleado, db: Session):
+    """Solo el empleado de la tarea o el jefe que la mandó pueden verla/escribir en ella."""
+    empleado = db.query(models.Fontanero).filter(models.Fontanero.id == tarea.empleado_id).first()
+    dueño = db.query(models.Fontanero).filter(models.Fontanero.id == tarea.empresa_id).first()
+    ids_validos = {x for x in [(empleado.usuario_id if empleado else None), (dueño.usuario_id if dueño else None)] if x is not None}
+    if current_user["id"] not in ids_validos:
+        raise HTTPException(status_code=403, detail="No puedes acceder a esta tarea")
+    return empleado, dueño
+
+@app.get("/tareas/{tarea_id}/mensajes", response_model=List[schemas.TareaMensajeRespuesta])
+def ver_mensajes_tarea(
+    tarea_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    tarea = db.query(models.TareaEmpleado).filter(models.TareaEmpleado.id == tarea_id).first()
+    if not tarea:
+        raise HTTPException(status_code=404, detail="Tarea no encontrada")
+    _verificar_acceso_tarea(current_user, tarea, db)
+    mensajes = db.query(models.TareaMensaje).filter(
+        models.TareaMensaje.tarea_id == tarea_id
+    ).order_by(models.TareaMensaje.creado_en).all()
+    resultado = []
+    for m in mensajes:
+        item = schemas.TareaMensajeRespuesta.model_validate(m)
+        autor = db.query(models.Usuario).filter(models.Usuario.id == m.autor_usuario_id).first()
+        item.autor_nombre = autor.nombre if autor else None
+        resultado.append(item)
+    return resultado
+
+@app.post("/tareas/{tarea_id}/mensajes", response_model=schemas.TareaMensajeRespuesta)
+def enviar_mensaje_tarea(
+    tarea_id: int,
+    datos: schemas.TareaMensajeCrear,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    tarea = db.query(models.TareaEmpleado).filter(models.TareaEmpleado.id == tarea_id).first()
+    if not tarea:
+        raise HTTPException(status_code=404, detail="Tarea no encontrada")
+    empleado, dueño = _verificar_acceso_tarea(current_user, tarea, db)
+    texto = datos.texto.strip()
+    if not texto:
+        raise HTTPException(status_code=422, detail="El mensaje no puede estar vacío")
+    nuevo = models.TareaMensaje(tarea_id=tarea_id, autor_usuario_id=current_user["id"], texto=texto)
+    db.add(nuevo)
+    db.commit()
+    db.refresh(nuevo)
+    es_el_empleado = current_user["id"] == (empleado.usuario_id if empleado else None)
+    destino_usuario_id = (dueño.usuario_id if dueño else None) if es_el_empleado else (empleado.usuario_id if empleado else None)
+    if destino_usuario_id:
+        _crear_notificacion(db, destino_usuario_id, "💬 Mensaje sobre una tarea", texto[:120], "tarea_mensaje", tarea_id)
+        db.commit()
+    item = schemas.TareaMensajeRespuesta.model_validate(nuevo)
+    autor = db.query(models.Usuario).filter(models.Usuario.id == current_user["id"]).first()
+    item.autor_nombre = autor.nombre if autor else None
+    return item
+
+# ─── RECORDATORIO DE TAREAS CON HORA ────────────────────────────────────────────
+# Igual patrón que _bucle_recordatorios (citas): cada 2 minutos revisa qué tareas
+# con fecha_objetivo están por vencer y avisa una sola vez (recordatorio_enviado).
+
+MINUTOS_ANTES_RECORDATORIO_TAREA = 15
+
+def _bucle_recordatorios_tarea():
+    from .database import SessionLocal
+    while True:
+        db = None
+        try:
+            db = SessionLocal()
+            ahora = datetime.datetime.utcnow()
+            limite = ahora + datetime.timedelta(minutes=MINUTOS_ANTES_RECORDATORIO_TAREA)
+            proximas = db.query(models.TareaEmpleado).filter(
+                models.TareaEmpleado.fecha_objetivo != None,
+                models.TareaEmpleado.fecha_objetivo > ahora,
+                models.TareaEmpleado.fecha_objetivo <= limite,
+                models.TareaEmpleado.recordatorio_enviado == False,
+                ~models.TareaEmpleado.estado.in_(ESTADOS_TERMINALES_TAREA),
+            ).all()
+            for tarea in proximas:
+                empleado = db.query(models.Fontanero).filter(models.Fontanero.id == tarea.empleado_id).first()
+                if empleado and empleado.usuario_id:
+                    minutos = max(1, int((tarea.fecha_objetivo - ahora).total_seconds() // 60))
+                    _crear_notificacion(
+                        db, empleado.usuario_id, f"⏰ En {minutos} minutos",
+                        tarea.descripcion[:120], "tarea_recordatorio", tarea.id,
+                    )
+                tarea.recordatorio_enviado = True
+            db.commit()
+        except Exception as e:
+            print(f"[recordatorios-tarea] error: {e}")
+        finally:
+            if db is not None:
+                db.close()
+        _time.sleep(120)
+
+if os.getenv("DESACTIVAR_RECORDATORIOS", "") != "1":
+    threading.Thread(target=_bucle_recordatorios_tarea, daemon=True).start()
 
 @app.get("/fontaneros/{fontanero_id}/comision-empresa-pendiente", response_model=schemas.ComisionEmpresaRespuesta)
 def comision_empresa_pendiente(

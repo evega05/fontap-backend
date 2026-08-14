@@ -152,7 +152,22 @@ class TareaEmpleado(Base):
     empleado_id = Column(Integer, ForeignKey("fontaneros.id"))  # Fontanero.id del empleado
     servicio_id = Column(Integer, ForeignKey("servicios.id"), nullable=True)
     descripcion = Column(Text)
-    estado = Column(String, default="pendiente")  # pendiente, aceptada, en_camino, terminada
+    estado = Column(String, default="pendiente")  # pendiente, aceptada, en_camino, terminada, rechazada
+    fecha_objetivo = Column(DateTime, nullable=True)  # para cuándo es, si tiene hora fija
+    urgente = Column(Boolean, default=False)
+    motivo_rechazo = Column(Text, nullable=True)  # por qué el empleado no pudo tomarla
+    nota_finalizacion = Column(Text, nullable=True)  # comentario opcional al marcarla terminada
+    recordatorio_enviado = Column(Boolean, default=False)  # aviso 15 min antes de fecha_objetivo, una sola vez
+    creado_en = Column(DateTime, default=utcnow)
+
+class TareaMensaje(Base):
+    """Mini chat entre jefe y empleado sobre una TareaEmpleado puntual — más liviano que
+    el chat de un Servicio real, porque muchas tareas son avisos internos sin cliente."""
+    __tablename__ = "tarea_mensajes"
+    id = Column(Integer, primary_key=True, index=True)
+    tarea_id = Column(Integer, ForeignKey("tareas_empleado.id"))
+    autor_usuario_id = Column(Integer, ForeignKey("usuarios.id"))
+    texto = Column(Text)
     creado_en = Column(DateTime, default=utcnow)
 
 class Mensaje(Base):

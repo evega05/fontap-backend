@@ -127,9 +127,13 @@ class TareaEmpleadoCrear(BaseModel):
     empleado_fontanero_id: int
     descripcion: str
     servicio_id: Optional[int] = None
+    fecha_objetivo: Optional[datetime.datetime] = None
+    urgente: bool = False
 
 class TareaEmpleadoEstadoActualizar(BaseModel):
-    estado: str  # aceptada, en_camino, terminada
+    estado: str  # aceptada, en_camino, terminada, rechazada
+    motivo: Optional[str] = None  # cuando estado == rechazada
+    nota: Optional[str] = None  # cuando estado == terminada
 
 class TareaEmpleadoRespuesta(BaseModel):
     id: int
@@ -141,9 +145,27 @@ class TareaEmpleadoRespuesta(BaseModel):
     servicio_id: Optional[int] = None
     descripcion: str
     estado: str
+    fecha_objetivo: Optional[datetime.datetime] = None
+    urgente: bool = False
+    motivo_rechazo: Optional[str] = None
+    nota_finalizacion: Optional[str] = None
     creado_en: datetime.datetime
     nombre_empresa: Optional[str] = None
     logo_empresa_url: Optional[str] = None
+    empresa_telefono: Optional[str] = None
+    class Config:
+        from_attributes = True
+
+class TareaMensajeCrear(BaseModel):
+    texto: str
+
+class TareaMensajeRespuesta(BaseModel):
+    id: int
+    tarea_id: int
+    autor_usuario_id: int
+    autor_nombre: Optional[str] = None
+    texto: str
+    creado_en: datetime.datetime
     class Config:
         from_attributes = True
 
